@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import test from "node:test";
 import { buildStrudelCode, normalizePlan, parseModelJson, server as staticServer } from "../server.mjs";
@@ -89,6 +90,19 @@ test("静态首页和 Strudel 运行文件可以由 Node 服务访问", async ()
   } finally {
     await close(staticServer);
   }
+});
+
+test("前端会注册完整 GM、波表和鼓机别名音色库", async () => {
+  const source = await readFile(new URL("../app.js", import.meta.url), "utf8");
+  assert.match(source, /uzu-wavetables\.json/);
+  assert.match(source, /Dirt-Samples\.json/);
+  assert.match(source, /mridangam\.json/);
+  assert.match(source, /@strudel\/soundfonts@1\.3\.0\/gm\.mjs/);
+  assert.match(source, /registerStrudelSoundfonts\(api\)/);
+  assert.match(source, /await api\.aliasBank\(STRUDEL_DRUM_ALIAS_MAP_URL\)/);
+  assert.match(source, /"gm_flute"/);
+  assert.match(source, /"gm_harmonica"/);
+  assert.match(source, /"wt_digital_bad_day"/);
 });
 
 test("完整 API 链可以把 MiniMax 响应转换成可播放代码", async () => {

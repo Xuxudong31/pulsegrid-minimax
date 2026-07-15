@@ -205,15 +205,47 @@ const PROJECT_LIBRARY_STORAGE_KEY = "pulsegrid.projects.v1";
 const ACTIVE_PROJECT_STORAGE_KEY = "pulsegrid.projects.active.v1";
 const MAX_SAVED_PROJECTS = 50;
 const STRUDEL_SAMPLE_MAPS = [
-  "https://strudel.b-cdn.net/piano.json",
-  "https://strudel.b-cdn.net/vcsl.json",
-  "https://strudel.b-cdn.net/tidal-drum-machines.json",
-  "https://strudel.b-cdn.net/uzu-drumkit.json",
-  "https://strudel.b-cdn.net/tidal-drum-machines-alias.json",
+  {
+    url: "https://strudel.b-cdn.net/piano.json",
+    baseUrl: "https://strudel.b-cdn.net/piano/",
+  },
+  {
+    url: "https://strudel.b-cdn.net/vcsl.json",
+    baseUrl: "https://strudel.b-cdn.net/VCSL/",
+  },
+  {
+    url: "https://strudel.b-cdn.net/tidal-drum-machines.json",
+    baseUrl: "https://strudel.b-cdn.net/tidal-drum-machines/machines/",
+    tag: "drum-machines",
+  },
+  {
+    url: "https://strudel.b-cdn.net/uzu-drumkit.json",
+    baseUrl: "https://strudel.b-cdn.net/uzu-drumkit/",
+    tag: "drum-machines",
+  },
+  {
+    url: "https://strudel.b-cdn.net/mridangam.json",
+    baseUrl: "https://strudel.b-cdn.net/mrid/",
+    tag: "drum-machines",
+  },
+  {
+    url: "https://strudel.b-cdn.net/Dirt-Samples.json",
+    baseUrl: "https://strudel.b-cdn.net/Dirt-Samples/",
+  },
+  {
+    url: "https://strudel.b-cdn.net/uzu-wavetables.json",
+    baseUrl: "https://strudel.b-cdn.net/uzu-wavetables/",
+  },
 ];
 const STRUDEL_OPTIONAL_SAMPLE_MAPS = [
   "https://raw.githubusercontent.com/tidalcycles/Dirt-Samples/master/strudel.json",
 ];
+const STRUDEL_DRUM_ALIAS_MAP_URL = "https://strudel.b-cdn.net/tidal-drum-machines-alias.json";
+const STRUDEL_GM_MAP_URLS = [
+  "https://unpkg.com/@strudel/soundfonts@1.3.0/gm.mjs",
+  "https://cdn.jsdelivr.net/npm/@strudel/soundfonts@1.3.0/gm.mjs",
+];
+const STRUDEL_SOUNDFONT_BASE_URL = "https://felixroos.github.io/webaudiofontdata/sound";
 const ROOT_MIDI = { C: 36, "C#": 37, Db: 37, D: 38, "D#": 39, Eb: 39, E: 40, F: 41, "F#": 42, Gb: 42, G: 43, "G#": 44, Ab: 44, A: 45, "A#": 46, Bb: 46, B: 47 };
 const NOTE_NAMES = ["c", "cs", "d", "ds", "e", "f", "fs", "g", "gs", "a", "as", "b"];
 
@@ -1135,6 +1167,175 @@ function normalizeOscillator(value, fallback = "sawtooth") {
   return fallback;
 }
 
+const strudelSoundfontPresetCache = new Map();
+const strudelSoundfontBufferCache = new Map();
+
+async function loadStrudelGmMap() {
+  let lastError;
+  for (const url of STRUDEL_GM_MAP_URLS) {
+    try {
+      const module = await import(url);
+      if (module?.default && typeof module.default === "object") return module.default;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(lastError?.message || "GM 乐器清单加载失败");
+}
+
+async function loadStrudelSoundfontPreset(fontName) {
+  if (strudelSoundfontPresetCache.has(fontName)) return strudelSoundfontPresetCache.get(fontName);
+
+  const pending = (async () => {
+    const response = await fetch(`${STRUDEL_SOUNDFONT_BASE_URL}/${fontName}.js`);
+    if (!response.ok) throw new Error(`SoundFont ${fontName} 下载失败（${response.status}）`);
+    const source = await response.text();
+    const marker = source.indexOf("={");
+    if (marker < 0) throw new Error(`SoundFont ${fontName} 数据格式不正确`);
+    const objectSource = `{${source.slice(marker + 2)}`.replace(/;\s*$/, "");
+    const preset = Function(`"use strict"; return (${objectSource});`)();
+    const zones = Array.isArray(preset) ? preset : preset?.zones;
+    if (!Array.isArray(zones) || zones.length === 0) throw new Error(`SoundFont ${fontName} 没有可用音区`);
+    return zones;
+  })();
+
+  strudelSoundfontPresetCache.set(fontName, pending);
+  pending.catch(() => strudelSoundfontPresetCache.delete(fontName));
+  return pending;
+}
+
+function findStrudelSoundfontZone(zones, pitch) {
+  return zones.find((zone) => zone.keyRangeLow <= pitch && zone.keyRangeHigh + 1 >= pitch);
+}
+
+async function decodeStrudelSoundfontZone(zone, audioContext) {
+  if (zone.buffer) return zone.buffer;
+
+  if (zone.sample) {
+    const decoded = atob(zone.sample);
+    const buffer = audioContext.createBuffer(1, Math.floor(decoded.length / 2), zone.sampleRate);
+    const channel = buffer.getChannelData(0);
+    for (let index = 0; index < channel.length; index += 1) {
+      const low = decoded.charCodeAt(index * 2);
+      const high = decoded.charCodeAt(index * 2 + 1);
+      let sample = high * 256 + low;
+      if (sample >= 32768) sample -= 65536;
+      channel[index] = sample / 65536;
+    }
+    zone.buffer = buffer;
+    return buffer;
+  }
+
+  if (!zone.file) return null;
+  const decoded = atob(zone.file);
+  const bytes = new Uint8Array(decoded.length);
+  for (let index = 0; index < decoded.length; index += 1) bytes[index] = decoded.charCodeAt(index);
+  const buffer = await audioContext.decodeAudioData(bytes.buffer);
+  zone.buffer = buffer;
+  return buffer;
+}
+
+async function getStrudelSoundfontBuffer(fontName, pitch, audioContext) {
+  const cacheKey = `${fontName}:::${pitch}`;
+  if (strudelSoundfontBufferCache.has(cacheKey)) return strudelSoundfontBufferCache.get(cacheKey);
+
+  const pending = (async () => {
+    const zones = await loadStrudelSoundfontPreset(fontName);
+    const zone = findStrudelSoundfontZone(zones, pitch);
+    if (!zone) throw new Error(`SoundFont ${fontName} 不支持音高 ${pitch}`);
+    const buffer = await decodeStrudelSoundfontZone(zone, audioContext);
+    if (!buffer) throw new Error(`SoundFont ${fontName} 的音频数据不可用`);
+    return { buffer, zone };
+  })();
+
+  strudelSoundfontBufferCache.set(cacheKey, pending);
+  pending.catch(() => strudelSoundfontBufferCache.delete(cacheKey));
+  return pending;
+}
+
+async function createStrudelSoundfontSource(api, fontName, value, audioContext) {
+  const note = value.note ?? "c3";
+  let pitch;
+  if (value.freq) pitch = api.freqToMidi(value.freq);
+  else if (typeof note === "string") pitch = api.noteToMidi(note);
+  else if (typeof note === "number") pitch = note;
+  else throw new Error(`无法识别 SoundFont 音高类型：${typeof note}`);
+
+  const { buffer, zone } = await getStrudelSoundfontBuffer(fontName, pitch, audioContext);
+  const source = audioContext.createBufferSource();
+  source.buffer = buffer;
+  const baseDetune = zone.originalPitch - 100 * zone.coarseTune - zone.fineTune;
+  source.playbackRate.value = 2 ** ((100 * pitch - baseDetune) / 1200);
+  if (zone.loopStart > 1 && zone.loopStart < zone.loopEnd) {
+    source.loop = true;
+    source.loopStart = zone.loopStart / zone.sampleRate;
+    source.loopEnd = zone.loopEnd / zone.sampleRate;
+  }
+  return source;
+}
+
+async function registerStrudelSoundfonts(api) {
+  const requiredMethods = [
+    "registerSound",
+    "getADSRValues",
+    "getAudioContext",
+    "getParamADSR",
+    "getPitchEnvelope",
+    "getSoundIndex",
+    "getVibratoOscillator",
+    "noteToMidi",
+    "freqToMidi",
+    "onceEnded",
+    "releaseAudioNode",
+  ];
+  const missingMethods = requiredMethods.filter((name) => typeof api[name] !== "function");
+  if (missingMethods.length) throw new Error(`当前 Strudel 版本缺少 SoundFont 接口：${missingMethods.join("、")}`);
+
+  const gmMap = await loadStrudelGmMap();
+  let registeredCount = 0;
+  Object.entries(gmMap).forEach(([name, fonts]) => {
+    if (!Array.isArray(fonts) || fonts.length === 0) return;
+    api.registerSound(
+      name,
+      async (time, value, onended) => {
+        const [attack, decay, sustain, release] = api.getADSRValues([
+          value.attack,
+          value.decay,
+          value.sustain,
+          value.release,
+        ]);
+        const fontIndex = api.getSoundIndex(value.n, fonts.length);
+        const audioContext = api.getAudioContext();
+        const source = await createStrudelSoundfontSource(api, fonts[fontIndex], value, audioContext);
+        const envelope = audioContext.createGain();
+        const node = source.connect(envelope);
+        const startTime = Math.max(time, audioContext.currentTime);
+        const holdEnd = startTime + value.duration;
+        api.getParamADSR(envelope.gain, attack, decay, sustain, release, 0, 0.3, startTime, holdEnd, "linear");
+        const endTime = holdEnd + release + 0.01;
+        const vibrato = api.getVibratoOscillator(source.detune, value, startTime);
+        api.getPitchEnvelope(source.detune, value, startTime, holdEnd);
+        api.onceEnded(source, () => {
+          api.releaseAudioNode(source);
+          vibrato?.stop();
+          onended();
+        });
+        source.start(startTime);
+        source.stop(endTime);
+        return {
+          node,
+          stop: () => {},
+          nodes: { source: [source], ...vibrato?.nodes },
+        };
+      },
+      { type: "soundfont", prebake: true, fonts },
+    );
+    registeredCount += 1;
+  });
+
+  return registeredCount;
+}
+
 class StrudelRuntime {
   constructor() {
     this.api = null;
@@ -1147,6 +1348,7 @@ class StrudelRuntime {
     this.animationFrame = 0;
     this.analyser = null;
     this.analyserSource = null;
+    this.soundfontCount = 0;
   }
 
   setState(message, state = "") {
@@ -1179,20 +1381,42 @@ class StrudelRuntime {
       }
 
       window.sliderWithID = window.sliderWithID || ((_id, value) => Number(value));
-      const sampleResults = await Promise.allSettled(STRUDEL_SAMPLE_MAPS.map((url) => api.samples(url)));
-      const drumMapReady = typeof api.getSound === "function" && api.getSound("RolandTR909_bd");
-      if (!drumMapReady) {
-        const reason = sampleResults.find((result) => result.status === "rejected")?.reason;
-        throw new Error(reason?.message || "Strudel 鼓组采样表加载失败，请检查网络");
+      this.setState("正在加载完整采样、鼓机、GM 乐器与波表音色…", "loading");
+      const [sampleResults, soundfontCount] = await Promise.all([
+        Promise.allSettled(STRUDEL_SAMPLE_MAPS.map(({ url, baseUrl, tag }) => (
+          api.samples(url, baseUrl, { prebake: true, ...(tag ? { tag } : {}) })
+        ))),
+        registerStrudelSoundfonts(api),
+      ]);
+      const failedSampleMaps = sampleResults
+        .map((result, index) => ({ result, source: STRUDEL_SAMPLE_MAPS[index].url }))
+        .filter(({ result }) => result.status === "rejected");
+      if (failedSampleMaps.length) {
+        const failedNames = failedSampleMaps.map(({ source }) => source.split("/").pop()).join("、");
+        throw new Error(`Strudel 音色表加载失败：${failedNames}`);
       }
+      await api.aliasBank(STRUDEL_DRUM_ALIAS_MAP_URL);
+      const requiredSounds = [
+        "piano",
+        "harmonica",
+        "RolandTR909_bd",
+        "9000_bd",
+        "gm_flute",
+        "gm_harmonica",
+        "wt_digital",
+        "wt_digital_bad_day",
+      ];
+      const missingSounds = requiredSounds.filter((name) => !api.getSound(name));
+      if (missingSounds.length) throw new Error(`以下 Strudel 音色没有注册成功：${missingSounds.join("、")}`);
       Promise.allSettled(STRUDEL_OPTIONAL_SAMPLE_MAPS.map((url) => api.samples(url)))
         .catch(() => {});
 
       this.api = api;
       this.repl = repl;
+      this.soundfontCount = soundfontCount;
       this.ready = true;
       this.connectAnalyser();
-      this.setState("官方 Strudel 音频引擎 · 已就绪", "ready");
+      this.setState(`完整 Strudel 音色库 · 已就绪（${soundfontCount} 组 GM 乐器）`, "ready");
       return api;
     })();
 
@@ -1263,7 +1487,7 @@ class StrudelRuntime {
       updateTransport(0, 0);
       highlightStep(-1);
     }
-    if (this.ready) this.setState("官方 Strudel 音频引擎 · 已就绪", "ready");
+    if (this.ready) this.setState(`完整 Strudel 音色库 · 已就绪（${this.soundfontCount} 组 GM 乐器）`, "ready");
   }
 
   startTransportClock() {
