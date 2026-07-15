@@ -1,0 +1,62 @@
+# 脉冲音格 · MiniMax AI
+
+一个接入 MiniMax 与 Official Strudel WebAudio 的浏览器音乐工作台：在左侧用自然语言描述音乐，MiniMax 会生成编曲计划，后端将它转换成受控、可编辑、可由真实 Strudel 运行的代码。
+
+## 配置 MiniMax API 密钥
+
+1. 在 MiniMax 开放平台的“接口密钥”页面创建 API Key。
+2. 打开项目中已经创建好的 `.env`。
+3. 在 `.env` 中填写密钥：
+
+```dotenv
+MINIMAX_API_KEY=你的密钥
+MINIMAX_MODEL=MiniMax-M3
+```
+
+`.env` 已加入 `.gitignore`，后端会在请求时重新读取它。保存后刷新网页即可，无须重新启动服务。不要把密钥写进 `app.js`、`index.html`，也不要把密钥发送到聊天中。
+
+## 运行
+
+在 VS Code 中按 `F5`，或在项目目录运行：
+
+```powershell
+npm start
+```
+
+浏览器打开 `http://localhost:4173`。现在必须通过本项目的 Node 后端启动，不能再双击 `index.html` 或使用普通 Python 静态服务器，否则 `/api/compose` 不存在。第一次播放时，浏览器会请求解锁音频，这是 Web Audio 的正常安全机制。
+
+## 发布网页版
+
+项目包含 Node 后端，不能只使用 GitHub Pages，否则 MiniMax 编曲接口无法运行。仓库根目录已经提供 `render.yaml`，可直接通过 Render 发布完整网页版：
+
+1. 将项目推送到 GitHub，确认 `.env` 没有被提交。
+2. 在 Render 中选择 **New → Blueprint**，连接这个 GitHub 仓库。
+3. 首次创建时，在 `MINIMAX_API_KEY` 输入框填写 MiniMax 密钥。
+4. 部署完成后分享 Render 提供的 `https://你的服务名.onrender.com` 地址。
+
+以后推送到默认分支会自动重新部署。密钥只保存在 Render 的环境变量中，不写入 GitHub。
+
+## 已实现
+
+- MiniMax-M3 中文/英文自然语言智能编曲
+- 密钥仅由本机 Node 后端读取，浏览器无法获取
+- 结构化编曲参数校验，后端生成受控 Strudel 代码
+- 支持在当前作品上继续修改，例如“低音再重一点”
+- 左上角项目库支持新建、搜索、打开和删除项目；新项目立即保存，编辑后约 0.7 秒自动保存
+- 自动迁移旧版单项目存档，最多保留 50 个本机项目
+- 主作品工具栏支持一键清空代码，并同步停止当前播放
+- House、Techno、Lo-fi、Ambient、Synthwave、Trance、DnB、Trap 风格
+- BPM、调性、明暗、能量与复杂度识别
+- Official `@strudel/web@1.3.0` REPL 运行时、调度器、鼓机采样与合成器
+- 4 分轨实时编曲与混音控制
+- 波形/频谱直接分析 Strudel 的真实总输出，播放时随音乐变化、停止时归零
+- Strudel 风格代码生成、编辑、解析、复制与导出
+- 支持 `stack()`、`s()`、`note()`、`.struct()`、`.scale()`、`.s()`、`.gain()`、`slider()` 与常用 `*4` mini-notation
+- 代码校验、错误行定位，以及 `Ctrl/Cmd + Enter` 运行、`Ctrl/Cmd + S` 保存
+- 本地保存、刷新恢复与响应式布局
+
+MiniMax 调用需要联网和可用额度；Strudel 运行库已随项目本地提供，鼓机与乐器采样仍需联网按需加载。浏览器首次播放需要由用户点击按钮解锁音频。
+
+## Strudel 许可
+
+本项目通过 `@strudel/web` 集成 Strudel。Strudel 使用 AGPL-3.0-or-later 许可；如果发布或分发本项目，请遵守 [Strudel 官方许可说明](https://strudel.cc/technical-manual/project-start/#respect-the-license)。
