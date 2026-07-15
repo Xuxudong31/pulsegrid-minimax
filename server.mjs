@@ -13,6 +13,7 @@ const MAX_BODY_BYTES = 120_000;
 const STYLES = new Set(["house", "techno", "lofi", "ambient", "synthwave", "trance", "dnb", "trap"]);
 const BANKS = new Set(["RolandTR909", "RolandTR808", "RolandTR707", "AkaiLinn"]);
 const SYNTHS = new Set(["sine", "triangle", "square", "sawtooth", "supersaw", "pulse"]);
+const BASE_TRACK_IDS = new Set(["drums", "bass", "chords", "lead"]);
 const LEAD_INSTRUMENTS = Object.freeze({
   synth: { label: "合成器", sound: null, envelope: ".attack(0.01).decay(0.16).sustain(0.06).release(0.2)", color: "" },
   harmonica: { label: "口琴", sound: "square", envelope: ".attack(0.04).decay(0.18).sustain(0.72).release(0.38)", color: ".vib(5.5).vibmod(0.12)" },
@@ -259,6 +260,13 @@ function normalizeInstrumentTracks(value, fallbackNotes, fallbackRhythm) {
   return tracks;
 }
 
+function normalizeDeletedTracks(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((track) => String(track || "").trim()).filter((track) => (
+    BASE_TRACK_IDS.has(track) || (track !== "synth" && Object.hasOwn(LEAD_INSTRUMENTS, track))
+  )))];
+}
+
 function normalizePlan(raw) {
   const style = STYLES.has(raw?.style) ? raw.style : "house";
   const defaults = STYLE_DEFAULTS[style];
@@ -300,6 +308,7 @@ function normalizePlan(raw) {
       lead: clamp(raw?.volumes?.lead, 0, 1, defaultVolumes.lead),
     },
   };
+  plan.deletedTracks = normalizeDeletedTracks(raw?.deletedTracks);
   plan.instrumentTracks = normalizeInstrumentTracks(raw?.instrumentTracks, plan.leadNotes, plan.leadRhythm);
   if (plan.leadInstrument !== "synth" && !plan.instrumentTracks.some((track) => track.id === plan.leadInstrument)) {
     plan.instrumentTracks.push(normalizeInstrumentTracks([{
@@ -322,55 +331,74 @@ function fixed(value) {
 
 function buildStrudelCode(plan) {
   const chord = plan.chordNotes.join(",");
-  const instrumentTracks = normalizeInstrumentTracks(plan.instrumentTracks, plan.leadNotes, plan.leadRhythm);
+  const deletedTracks = new Set(normalizeDeletedTracks(plan.deletedTracks));
+  const instrumentTracks = normalizeInstrumentTracks(plan.instrumentTracks, plan.leadNotes, plan.leadRhythm)
+    .filter((track) => !deletedTracks.has(track.id));
+  const baseSliders = [
+    !deletedTracks.has("drums") && `let drumsVol = slider(${fixed(plan.volumes.drums)}, 0, 1, 0.01, "鼓组")`,
+    !deletedTracks.has("bass") && `let bassVol = slider(${fixed(plan.volumes.bass)}, 0, 1, 0.01, "贝斯")`,
+    !deletedTracks.has("chords") && `let chordsVol = slider(${fixed(plan.volumes.chords)}, 0, 1, 0.01, "和弦")`,
+    !deletedTracks.has("lead") && `let leadVol = slider(${fixed(plan.volumes.lead)}, 0, 1, 0.01, "主旋律")`,
+  ].filter(Boolean);
   const extraSliders = instrumentTracks.map((track) => (
     `let ${track.id}Vol = slider(${fixed(track.volume)}, 0, 1, 0.01, "${track.label}")`
   ));
-  const extraLayers = instrumentTracks.flatMap((track, index) => {
+  const layerExpressions = [];
+  if (!deletedTracks.has("drums")) {
+    layerExpressions.push(
+      `  s("${miniPattern(plan.kick, "bd")}")\n    .bank("${plan.bank}").gain(drumsVol)`,
+      `  s("${miniPattern(plan.snare, "cp")}")\n    .bank("${plan.bank}").gain(drumsVol)`,
+      `  s("${miniPattern(plan.hats, "hh")}")\n    .bank("${plan.bank}").gain(drumsVol)`,
+    );
+  }
+  if (!deletedTracks.has("bass")) {
+    layerExpressions.push([
+      `  note("<${plan.bassNotes.join(" ")}>")`,
+      `    .s("${plan.bassSynth}").struct("${miniPattern(plan.bassRhythm, "x")}")`,
+      "    .attack(0.01).decay(0.18).sustain(0.12).release(0.15)",
+      `    .cutoff(tone).resonance(${fixed(plan.resonance)}).gain(bassVol)`,
+    ].join("\n"));
+  }
+  if (!deletedTracks.has("chords")) {
+    layerExpressions.push([
+      `  note("[${chord}]")`,
+      `    .s("${plan.chordSynth}").slow(4).attack(0.3).release(1.4)`,
+      `    .cutoff(${Math.round(plan.tone * 0.72)}).room(${fixed(plan.room)}).gain(chordsVol)`,
+    ].join("\n"));
+  }
+  if (!deletedTracks.has("lead")) {
+    layerExpressions.push([
+      "  // 原主旋律",
+      `  note("<${plan.leadNotes.join(" ")}>")`,
+      `    .s("${plan.leadSynth}").struct("${miniPattern(plan.leadRhythm, "x")}")`,
+      "    .attack(0.01).decay(0.16).sustain(0.06).release(0.2)",
+      `    .cutoff(${plan.tone}).delay(${fixed(plan.delay)}).room(${fixed(Math.min(0.9, plan.room + 0.1))}).gain(leadVol)`,
+    ].join("\n"));
+  }
+  instrumentTracks.forEach((track) => {
     const profile = LEAD_INSTRUMENTS[track.instrument];
-    const isLast = index === instrumentTracks.length - 1;
-    return [
+    layerExpressions.push([
       `  // 独立乐器轨道：${track.label}`,
       `  note("<${track.notes.join(" ")}>")`,
       `    .s("${profile.sound}").struct("${miniPattern(track.rhythm, "x")}")`,
       `    ${profile.envelope}`,
       ...(profile.color ? [`    ${profile.color}`] : []),
-      `    .cutoff(${plan.tone}).delay(${fixed(plan.delay)}).room(${fixed(Math.min(0.9, plan.room + 0.12))}).gain(${track.id}Vol)${isLast ? "" : ","}`,
-    ];
+      `    .cutoff(${plan.tone}).delay(${fixed(plan.delay)}).room(${fixed(Math.min(0.9, plan.room + 0.12))}).gain(${track.id}Vol)`,
+    ].join("\n"));
   });
+  if (!layerExpressions.length) layerExpressions.push('  s("~") // 静音占位');
   return [
     `// DJ OPUS / 脉冲音格 / ${plan.title}`,
     ...(plan.request ? [`// AI 修改：${plan.request}`] : []),
     `setcps(${plan.bpm} / 60 / 4)`,
     "",
     'let masterVol = slider(0.78, 0, 1, 0.01, "总音量")',
-    `let drumsVol = slider(${fixed(plan.volumes.drums)}, 0, 1, 0.01, "鼓组")`,
-    `let bassVol = slider(${fixed(plan.volumes.bass)}, 0, 1, 0.01, "贝斯")`,
-    `let chordsVol = slider(${fixed(plan.volumes.chords)}, 0, 1, 0.01, "和弦")`,
-    `let leadVol = slider(${fixed(plan.volumes.lead)}, 0, 1, 0.01, "主旋律")`,
+    ...baseSliders,
     ...extraSliders,
     `let tone = slider(${plan.tone}, 200, 6000, 10, "音色明暗")`,
     "",
     "stack(",
-    `  s("${miniPattern(plan.kick, "bd")}")`,
-    `    .bank("${plan.bank}").gain(drumsVol),`,
-    `  s("${miniPattern(plan.snare, "cp")}")`,
-    `    .bank("${plan.bank}").gain(drumsVol),`,
-    `  s("${miniPattern(plan.hats, "hh")}")`,
-    `    .bank("${plan.bank}").gain(drumsVol),`,
-    `  note("<${plan.bassNotes.join(" ")}>")`,
-    `    .s("${plan.bassSynth}").struct("${miniPattern(plan.bassRhythm, "x")}")`,
-    "    .attack(0.01).decay(0.18).sustain(0.12).release(0.15)",
-    `    .cutoff(tone).resonance(${fixed(plan.resonance)}).gain(bassVol),`,
-    `  note("[${chord}]")`,
-    `    .s("${plan.chordSynth}").slow(4).attack(0.3).release(1.4)`,
-    `    .cutoff(${Math.round(plan.tone * 0.72)}).room(${fixed(plan.room)}).gain(chordsVol),`,
-    "  // 原主旋律",
-    `  note("<${plan.leadNotes.join(" ")}>")`,
-    `    .s("${plan.leadSynth}").struct("${miniPattern(plan.leadRhythm, "x")}")`,
-    "    .attack(0.01).decay(0.16).sustain(0.06).release(0.2)",
-    `    .cutoff(${plan.tone}).delay(${fixed(plan.delay)}).room(${fixed(Math.min(0.9, plan.room + 0.1))}).gain(leadVol)${instrumentTracks.length ? "," : ""}`,
-    ...extraLayers,
+    layerExpressions.join(",\n"),
     ").gain(masterVol)",
   ].join("\n");
 }
@@ -427,7 +455,7 @@ async function callMiniMax(messages, config) {
   }
 }
 
-async function composeWithMiniMax(prompt, currentCode, currentInstrumentTracks = []) {
+async function composeWithMiniMax(prompt, currentCode, currentInstrumentTracks = [], currentDeletedTracks = []) {
   const config = miniMaxConfig();
   const current = currentCode
     ? `\n\n当前正在播放的 Strudel 作品如下。若用户是在提出修改，请以它为基础：\n${currentCode.slice(0, 18_000)}`
@@ -450,15 +478,19 @@ async function composeWithMiniMax(prompt, currentCode, currentInstrumentTracks =
   }
   const plan = normalizePlan(raw);
   const requestedInstruments = detectRequestedInstruments(prompt);
-  const requestedInstrument = requestedInstruments[0] || null;
-  const previousTracks = normalizeInstrumentTracks(currentInstrumentTracks, plan.leadNotes, plan.leadRhythm);
+  const deletedTracks = new Set(normalizeDeletedTracks(currentDeletedTracks));
+  requestedInstruments.forEach((instrument) => deletedTracks.delete(instrument));
+  const previousTracks = normalizeInstrumentTracks(currentInstrumentTracks, plan.leadNotes, plan.leadRhythm)
+    .filter((track) => !deletedTracks.has(track.id));
   const mergedTracks = new Map(previousTracks.map((track) => [track.id, track]));
   plan.instrumentTracks
+    .filter((track) => !deletedTracks.has(track.id))
     .filter((track) => !requestedInstruments.length || requestedInstruments.includes(track.id))
     .forEach((track) => mergedTracks.set(track.id, track));
   const legacyInstrument = normalizeLeadInstrument(raw?.leadInstrument);
   if (legacyInstrument !== "synth"
     && (!requestedInstruments.length || requestedInstruments.includes(legacyInstrument))
+    && !deletedTracks.has(legacyInstrument)
     && !mergedTracks.has(legacyInstrument)) {
     mergedTracks.set(legacyInstrument, normalizeInstrumentTracks([{
       instrument: legacyInstrument,
@@ -476,8 +508,12 @@ async function composeWithMiniMax(prompt, currentCode, currentInstrumentTracks =
       volume: 0.55,
     }], plan.leadNotes, plan.leadRhythm)[0]);
   });
-  detectRemovedInstruments(prompt).forEach((instrument) => mergedTracks.delete(instrument));
+  detectRemovedInstruments(prompt).forEach((instrument) => {
+    mergedTracks.delete(instrument);
+    deletedTracks.add(instrument);
+  });
   plan.instrumentTracks = [...mergedTracks.values()].filter(Boolean).slice(0, 6);
+  plan.deletedTracks = [...deletedTracks];
   plan.leadInstrument = requestedInstruments.at(-1) || plan.instrumentTracks.at(-1)?.instrument || "synth";
   plan.request = safeText(prompt, "更新编曲", 72);
   const leadInstrument = LEAD_INSTRUMENTS[plan.leadInstrument] || LEAD_INSTRUMENTS.synth;
@@ -491,6 +527,7 @@ async function composeWithMiniMax(prompt, currentCode, currentInstrumentTracks =
     key: plan.key,
     leadInstrument: plan.leadInstrument,
     leadInstrumentLabel: leadInstrument.label,
+    deletedTracks: plan.deletedTracks,
     instrumentTracks: plan.instrumentTracks.map((track) => ({
       id: track.id,
       instrument: track.instrument,
@@ -535,9 +572,10 @@ async function handleApi(req, res, url) {
     const prompt = String(body.prompt || "").trim();
     const currentCode = typeof body.currentCode === "string" ? body.currentCode : "";
     const instrumentTracks = Array.isArray(body.instrumentTracks) ? body.instrumentTracks : [];
+    const deletedTracks = normalizeDeletedTracks(body.deletedTracks);
     if (!prompt) throw Object.assign(new Error("请输入音乐描述"), { status: 400 });
     if (prompt.length > 600) throw Object.assign(new Error("音乐描述不能超过 600 个字符"), { status: 400 });
-    const result = await composeWithMiniMax(prompt, currentCode, instrumentTracks);
+    const result = await composeWithMiniMax(prompt, currentCode, instrumentTracks, deletedTracks);
     json(res, 200, result);
     return;
   }

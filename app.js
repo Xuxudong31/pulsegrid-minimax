@@ -180,6 +180,7 @@ const INSTRUMENT_TRACK_META = Object.freeze({
   marimba: { label: "马林巴", detail: "木质 / 独立旋律" },
 });
 const TRACK_COLOR_CLASSES = ["coral", "violet", "mint", "amber"];
+const BASE_TRACK_IDS = ["drums", "bass", "chords", "lead"];
 const LEGACY_PROJECT_STORAGE_KEY = "pulsegrid.project.v2";
 const PROJECT_LIBRARY_STORAGE_KEY = "pulsegrid.projects.v1";
 const ACTIVE_PROJECT_STORAGE_KEY = "pulsegrid.projects.active.v1";
@@ -290,6 +291,7 @@ function createComposition(prompt) {
     volumes,
     muted: { drums: volumes.drums === 0, bass: false, chords: false, lead: volumes.lead === 0 },
     instrumentTracks: [],
+    deletedTracks: [],
     projectName: names[preset.id],
     prompt: text,
   };
@@ -331,7 +333,7 @@ function buildPatternCode(comp) {
   const cutoff = Math.round(comp.tone ?? (650 + comp.brightness * 3600));
   const room = comp.id === "ambient" ? 0.82 : comp.id === "techno" ? 0.25 : 0.5;
 
-  return [
+  const code = [
     `// 脉冲音格 / ${comp.label} / ${localizeKey(comp.key)}`,
     `setcps(${comp.bpm} / 60 / 4)`,
     "",
@@ -363,6 +365,7 @@ function buildPatternCode(comp) {
     `    .cutoff(${cutoff}).delay(0.35).room(${Math.min(0.78, room + 0.12)}).gain(leadVol)`,
     ").gain(masterVol)",
   ].join("\n");
+  return normalizeDeletedTracks(comp.deletedTracks).reduce((source, track) => removeTrackFromCode(source, track), code);
 }
 
 function lineNumberAt(code, index) {
@@ -515,6 +518,97 @@ function splitTopLevelExpressions(body) {
   const last = body.slice(start).trim();
   if (last) expressions.push(last);
   return expressions;
+}
+
+function normalizeDeletedTracks(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((track) => String(track || "").trim()).filter((track) => (
+    BASE_TRACK_IDS.includes(track) || Object.hasOwn(INSTRUMENT_TRACK_META, track)
+  )))];
+}
+
+function findCallRange(code, name) {
+  const match = new RegExp(`\\b${name}\\s*\\(`).exec(code);
+  if (!match) return null;
+  const openIndex = code.indexOf("(", match.index);
+  let depth = 0;
+  let quote = "";
+  let escaped = false;
+  for (let index = openIndex; index < code.length; index += 1) {
+    const char = code[index];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === quote) quote = "";
+      continue;
+    }
+    if (char === '"' || char === "'" || char === "`") {
+      quote = char;
+      continue;
+    }
+    if (char === "(") depth += 1;
+    if (char === ")") {
+      depth -= 1;
+      if (depth === 0) return { openIndex, closeIndex: index, body: code.slice(openIndex + 1, index) };
+    }
+  }
+  return null;
+}
+
+function formatStackExpression(expression) {
+  return expression.trim().split("\n").map((line) => {
+    const content = line.trimStart();
+    return `${content.startsWith(".") ? "    " : "  "}${content}`;
+  }).join("\n");
+}
+
+function removeTrackFromCode(source, trackId) {
+  const safeTrack = BASE_TRACK_IDS.includes(trackId) || Object.hasOwn(INSTRUMENT_TRACK_META, trackId) ? trackId : "";
+  if (!safeTrack) return source;
+  const variable = `${safeTrack}Vol`;
+  let code = String(source || "").replace(
+    new RegExp(`^\\s*(?:let|const)\\s+${variable}\\s*=\\s*slider\\([^\\n]*\\)\\s*;?\\s*\\r?\\n?`, "m"),
+    "",
+  );
+  const range = findCallRange(code, "stack");
+  if (!range) return code.replace(/\n{3,}/g, "\n\n").trim();
+  const gainPattern = new RegExp(`\\.gain\\(\\s*${variable}\\s*\\)`);
+  const expressions = splitTopLevelExpressions(range.body).filter((expression) => !gainPattern.test(expression));
+  const body = expressions.length
+    ? expressions.map(formatStackExpression).join(",\n")
+    : '  s("~") // 静音占位';
+  code = `${code.slice(0, range.openIndex + 1)}\n${body}\n${code.slice(range.closeIndex)}`;
+  return code.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function deleteCompositionTrack(trackId) {
+  const card = $(`.track-card[data-track="${trackId}"]`);
+  if (!card) return;
+  const label = card.querySelector(".track-name strong")?.textContent || "声音";
+  const editor = $("#codeEditor");
+  editor.value = removeTrackFromCode(editor.value, trackId);
+  composition.deletedTracks = normalizeDeletedTracks([...(composition.deletedTracks || []), trackId]);
+
+  if (BASE_TRACK_IDS.includes(trackId)) {
+    if (trackId === "drums") {
+      composition.kick = [];
+      composition.snare = [];
+      composition.hats = [];
+    } else if (trackId === "chords") {
+      composition.chordEnabled = false;
+    } else if (Array.isArray(composition[trackId])) {
+      composition[trackId] = [];
+    }
+    composition.muted[trackId] = true;
+  } else {
+    composition.instrumentTracks = composition.instrumentTracks.filter((track) => track.id !== trackId);
+  }
+
+  updateCompositionUI({ preserveCode: true });
+  setEditorDirty(true);
+  setEditorStatus(`${label}分轨及对应代码已删除`, "pending");
+  scheduleMixerRerun();
+  showToast(`${label}已从声音分轨和主作品代码中删除`);
 }
 
 function tokenizeMiniPattern(pattern) {
@@ -1152,7 +1246,10 @@ function renderInstrumentTrackCards() {
     card.dataset.track = track.id;
     card.dataset.dynamic = "true";
     card.innerHTML = `
-      <header><span class="track-index">${String(index + 5).padStart(2, "0")}</span><span class="track-led ${color}"></span></header>
+      <header>
+        <span class="track-index">${String(index + 5).padStart(2, "0")}</span>
+        <span class="track-card-actions"><span class="track-led ${color}"></span><button type="button" class="track-delete" data-track="${track.id}" aria-label="删除${escapeHTML(meta.label)}分轨" title="删除分轨">×</button></span>
+      </header>
       <div class="track-name"><strong>${escapeHTML(meta.label)}</strong><span>${escapeHTML(meta.detail)}</span></div>
       <div class="step-row ${color}-steps" aria-hidden="true"></div>
       <div class="track-controls">
@@ -1195,7 +1292,12 @@ function updateRangeFill(input) {
 
 function updateCompositionUI({ preserveCode = false } = {}) {
   composition.instrumentTracks = normalizeClientInstrumentTracks(composition.instrumentTracks);
+  composition.deletedTracks = normalizeDeletedTracks(composition.deletedTracks);
   renderInstrumentTrackCards();
+  BASE_TRACK_IDS.forEach((track) => {
+    const card = $(`.track-card[data-track="${track}"]`);
+    if (card) card.hidden = composition.deletedTracks.includes(track);
+  });
   $("#projectTitle").textContent = composition.projectName;
   const currentProjectLabel = $("#currentProjectLabel");
   if (currentProjectLabel) currentProjectLabel.textContent = composition.projectName;
@@ -1226,7 +1328,7 @@ function updateCompositionUI({ preserveCode = false } = {}) {
     $(`.mute-btn[data-track="${track}"]`)?.classList.toggle("active", state.muted);
     if (audio.trackGains[track]) audio.setMuted(track, state.muted);
   });
-  const activeTracks = ["drums", "bass", "chords", "lead", ...composition.instrumentTracks.map((track) => track.id)]
+  const activeTracks = [...BASE_TRACK_IDS.filter((track) => !composition.deletedTracks.includes(track)), ...composition.instrumentTracks.map((track) => track.id)]
     .map(getTrackMixState)
     .filter((state) => state.hasPattern && !state.muted).length;
   $("#activeTrackCount").textContent = `${activeTracks} 条轨道启用`;
@@ -1289,6 +1391,7 @@ function normalizeSavedComposition(savedComposition) {
     return [track, typeof muted === "boolean" ? muted : fallback.muted[track]];
   }));
   restored.instrumentTracks = normalizeClientInstrumentTracks(savedComposition.instrumentTracks);
+  restored.deletedTracks = normalizeDeletedTracks(savedComposition.deletedTracks);
   return restored;
 }
 
@@ -1679,6 +1782,7 @@ async function requestMiniMaxComposition(prompt) {
         prompt,
         currentCode: $("#codeEditor").value,
         instrumentTracks: composition.instrumentTracks,
+        deletedTracks: composition.deletedTracks,
       }),
       signal: controller.signal,
     });
@@ -1714,6 +1818,7 @@ function applyMiniMaxComposition(result, prompt) {
   composition.chordLabel = STYLE_PRESETS[base.id].chordLabel;
   composition.leadLabel = STYLE_PRESETS[base.id].leadLabel;
   composition.instrumentTracks = normalizeClientInstrumentTracks(result.instrumentTracks);
+  composition.deletedTracks = normalizeDeletedTracks(result.deletedTracks);
   const editor = $("#codeEditor");
   editor.value = code;
   editor.classList.remove("ai-updated");
@@ -2004,6 +2109,11 @@ function initEvents() {
     if (replaceSliderDefault(`${track}Vol`, value)) scheduleMixerRerun();
   });
   $("#trackGrid").addEventListener("click", (event) => {
+    const deleteButton = event.target.closest(".track-delete");
+    if (deleteButton && event.currentTarget.contains(deleteButton)) {
+      deleteCompositionTrack(deleteButton.dataset.track);
+      return;
+    }
     const button = event.target.closest(".mute-btn");
     if (!button || !event.currentTarget.contains(button)) return;
     const track = button.dataset.track;

@@ -65,6 +65,15 @@ test("明确要求口琴时会保留主旋律并新增独立口琴音轨", () =>
   assert.equal((code.match(/slider\(/g) || []).length, 7);
 });
 
+test("删除基础分轨会同时删除音量变量和演奏层", () => {
+  const plan = normalizePlan({ style: "house", key: "C minor", leadInstrument: "flute", deletedTracks: ["bass"] });
+  const code = buildStrudelCode(plan);
+  assert.doesNotMatch(code, /let bassVol = slider/);
+  assert.doesNotMatch(code, /\.gain\(bassVol\)/);
+  assert.match(code, /let fluteVol = slider/);
+  assert.match(code, /\.gain\(fluteVol\)/);
+});
+
 test("静态首页和 Strudel 运行文件可以由 Node 服务访问", async () => {
   const address = await listen(staticServer);
   try {
@@ -150,6 +159,56 @@ test("完整 API 链可以把 MiniMax 响应转换成可播放代码", async () 
     assert.match(body.code, /AI 修改：在现有作品里加入一段口琴主旋律/);
     assert.match(body.code, /let harmonicaVol = slider/);
     assert.match(body.code, /独立乐器轨道：口琴/);
+
+    const followUpResponse = await fetch(`http://127.0.0.1:${appAddress.port}/api/compose`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: "继续加入一条长笛旋律",
+        currentCode: body.code,
+        instrumentTracks: body.instrumentTracks,
+        deletedTracks: ["chords"],
+      }),
+    });
+    const followUp = await followUpResponse.json();
+    assert.equal(followUpResponse.status, 200);
+    assert.deepEqual(followUp.instrumentTracks.map((track) => track.id), ["harmonica", "flute"]);
+    assert.match(followUp.code, /let harmonicaVol = slider/);
+    assert.match(followUp.code, /let fluteVol = slider/);
+    assert.match(followUp.code, /\.gain\(harmonicaVol\)/);
+    assert.match(followUp.code, /\.gain\(fluteVol\)/);
+    assert.doesNotMatch(followUp.code, /let chordsVol = slider/);
+    assert.doesNotMatch(followUp.code, /\.gain\(chordsVol\)/);
+
+    const afterDeleteResponse = await fetch(`http://127.0.0.1:${appAddress.port}/api/compose`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: "把低音加重一点",
+        currentCode: followUp.code,
+        instrumentTracks: followUp.instrumentTracks.filter((track) => track.id !== "flute"),
+        deletedTracks: ["chords", "flute"],
+      }),
+    });
+    const afterDelete = await afterDeleteResponse.json();
+    assert.deepEqual(afterDelete.instrumentTracks.map((track) => track.id), ["harmonica"]);
+    assert.ok(afterDelete.deletedTracks.includes("flute"));
+    assert.doesNotMatch(afterDelete.code, /fluteVol/);
+
+    const restoredResponse = await fetch(`http://127.0.0.1:${appAddress.port}/api/compose`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: "重新加入长笛",
+        currentCode: afterDelete.code,
+        instrumentTracks: afterDelete.instrumentTracks,
+        deletedTracks: afterDelete.deletedTracks,
+      }),
+    });
+    const restored = await restoredResponse.json();
+    assert.deepEqual(restored.instrumentTracks.map((track) => track.id), ["harmonica", "flute"]);
+    assert.ok(!restored.deletedTracks.includes("flute"));
+    assert.match(restored.code, /let fluteVol = slider/);
     assert.equal(receivedUrl, "/v1/chat/completions");
     assert.equal(receivedAuthorization, "Bearer test-only-key");
   } finally {
