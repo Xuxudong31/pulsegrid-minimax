@@ -105,6 +105,29 @@ test("前端会注册完整 GM、波表和鼓机别名音色库", async () => {
   assert.match(source, /"wt_digital_bad_day"/);
 });
 
+test("声音浏览器采用两级折叠布局并可独立试听", async () => {
+  const [html, source, styles] = await Promise.all([
+    readFile(new URL("../index.html", import.meta.url), "utf8"),
+    readFile(new URL("../app.js", import.meta.url), "utf8"),
+    readFile(new URL("../styles.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(html, /data-sound-root="library"/);
+  assert.match(html, /data-sound-root="pulse"/);
+  assert.match(html, />声音<\/span>/);
+  assert.match(html, />音频脉冲<\/span>/);
+  assert.match(html, />乐器<\/span>/);
+  assert.match(html, />鼓机<\/span>/);
+  assert.match(html, />合成器<\/span>/);
+  assert.match(html, />波表<\/span>/);
+  assert.match(source, /previewSoundFromBrowser/);
+  assert.match(source, /api\.superdough/);
+  assert.match(source, /registerStrudelSampleMaps/);
+  assert.match(source, /api\.loadWorklets/);
+  assert.match(styles, /grid-template-columns:\s*270px 190px/);
+  assert.match(styles, /\.visual-panel\s*\{[^}]*grid-row:\s*1 \/ 3/);
+  assert.match(styles, /\.transport\s*\{[^}]*grid-column:\s*1;/);
+});
+
 test("完整 API 链可以把 MiniMax 响应转换成可播放代码", async () => {
   let receivedUrl = "";
   let receivedAuthorization = "";

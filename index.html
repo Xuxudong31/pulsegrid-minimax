@@ -222,29 +222,93 @@
               </footer>
             </article>
 
-            <article class="visual-panel panel">
-              <header class="panel-header">
-                <div>
-                  <span class="panel-kicker">实时示波</span>
-                  <h2>音频脉冲</h2>
-                </div>
-                <div class="scope-switch" role="group" aria-label="可视化模式">
-                  <button class="active" data-scope="wave">波形</button>
-                  <button data-scope="bars">频谱</button>
-                </div>
-              </header>
-              <div class="scope-stage">
-                <canvas id="visualizer"></canvas>
-                <div class="scope-grid" aria-hidden="true"></div>
-                <div class="scope-readout top-left"><span id="scopeStyle">深邃浩室</span></div>
-                <div class="scope-readout top-right"><span id="scopeKey">F 小调</span></div>
-                <div class="scope-readout bottom-left">左 / 右立体声</div>
-                <div class="scope-readout bottom-right"><span id="scopeDb">−∞</span> 分贝</div>
-              </div>
-              <div class="scope-stats">
-                <div><span>每分钟拍数</span><strong id="statBpm">122</strong></div>
-                <div><span>摇摆</span><strong id="statSwing">54%</strong></div>
-                <div><span>步数</span><strong>16</strong></div>
+            <article class="visual-panel sound-browser-panel panel" aria-label="声音浏览器">
+              <div class="sound-browser-body">
+                <section class="sound-root-accordion" data-sound-root="library">
+                  <button type="button" class="sound-root-trigger" aria-expanded="false" aria-controls="soundLibraryContent">
+                    <span>声音</span>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
+                  </button>
+                  <div class="sound-root-content" id="soundLibraryContent" hidden>
+                    <div class="sound-library-meta" aria-live="polite">
+                      <span id="soundLibraryStatus">正在加载音色…</span>
+                      <span id="soundPreviewStatus">点击任意声音即可试听</span>
+                    </div>
+                    <label class="sound-search" for="soundSearchInput">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></svg>
+                      <input id="soundSearchInput" type="search" placeholder="搜索声音名称…" autocomplete="off" />
+                    </label>
+
+                    <section class="sound-accordion" data-sound-section="instruments">
+                      <button type="button" class="sound-accordion-trigger" aria-expanded="false" aria-controls="soundListInstruments">
+                        <span>乐器</span><small data-sound-count="instruments">0 种</small>
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5" /></svg>
+                      </button>
+                      <div class="sound-accordion-content" id="soundListInstruments" hidden>
+                        <div class="sound-chip-list" data-sound-list="instruments"></div>
+                      </div>
+                    </section>
+
+                    <section class="sound-accordion" data-sound-section="drums">
+                      <button type="button" class="sound-accordion-trigger" aria-expanded="false" aria-controls="soundListDrums">
+                        <span>鼓机</span><small data-sound-count="drums">0 种</small>
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5" /></svg>
+                      </button>
+                      <div class="sound-accordion-content" id="soundListDrums" hidden>
+                        <div class="sound-chip-list" data-sound-list="drums"></div>
+                      </div>
+                    </section>
+
+                    <section class="sound-accordion" data-sound-section="synths">
+                      <button type="button" class="sound-accordion-trigger" aria-expanded="false" aria-controls="soundListSynths">
+                        <span>合成器</span><small data-sound-count="synths">0 种</small>
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5" /></svg>
+                      </button>
+                      <div class="sound-accordion-content" id="soundListSynths" hidden>
+                        <div class="sound-chip-list" data-sound-list="synths"></div>
+                      </div>
+                    </section>
+
+                    <section class="sound-accordion" data-sound-section="wavetables">
+                      <button type="button" class="sound-accordion-trigger" aria-expanded="false" aria-controls="soundListWavetables">
+                        <span>波表</span><small data-sound-count="wavetables">0 种</small>
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5" /></svg>
+                      </button>
+                      <div class="sound-accordion-content" id="soundListWavetables" hidden>
+                        <div class="sound-chip-list" data-sound-list="wavetables"></div>
+                      </div>
+                    </section>
+                  </div>
+                </section>
+
+                <section class="sound-root-accordion" data-sound-root="pulse">
+                  <button type="button" class="sound-root-trigger" aria-expanded="false" aria-controls="soundPulseContent">
+                    <span>音频脉冲</span>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
+                  </button>
+                  <div class="sound-root-content pulse-content" id="soundPulseContent" hidden>
+                    <div class="pulse-toolbar">
+                      <span>实时示波</span>
+                      <div class="scope-switch" role="group" aria-label="可视化模式">
+                        <button class="active" data-scope="wave">波形</button>
+                        <button data-scope="bars">频谱</button>
+                      </div>
+                    </div>
+                    <div class="scope-stage">
+                      <canvas id="visualizer"></canvas>
+                      <div class="scope-grid" aria-hidden="true"></div>
+                      <div class="scope-readout top-left"><span id="scopeStyle">深邃浩室</span></div>
+                      <div class="scope-readout top-right"><span id="scopeKey">F 小调</span></div>
+                      <div class="scope-readout bottom-left">左 / 右立体声</div>
+                      <div class="scope-readout bottom-right"><span id="scopeDb">−∞</span> 分贝</div>
+                    </div>
+                    <div class="scope-stats">
+                      <div><span>每分钟拍数</span><strong id="statBpm">122</strong></div>
+                      <div><span>摇摆</span><strong id="statSwing">54%</strong></div>
+                      <div><span>步数</span><strong>16</strong></div>
+                    </div>
+                  </div>
+                </section>
               </div>
             </article>
           </section>

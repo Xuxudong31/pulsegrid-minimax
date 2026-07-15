@@ -255,6 +255,8 @@ let toastTimer;
 let isGenerating = false;
 let projectLibrary = [];
 let currentProjectId = null;
+let soundSearchTimer;
+let soundPreviewClearTimer;
 
 function hashString(value) {
   let hash = 2166136261;
@@ -1336,6 +1338,42 @@ async function registerStrudelSoundfonts(api) {
   return registeredCount;
 }
 
+async function registerStrudelSampleMaps(api) {
+  const failures = [];
+  for (const source of STRUDEL_SAMPLE_MAPS) {
+    let lastError;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await api.samples(source.url, source.baseUrl, {
+          prebake: true,
+          ...(source.tag ? { tag: source.tag } : {}),
+        });
+        lastError = null;
+        break;
+      } catch (error) {
+        lastError = error;
+        if (attempt === 0) await new Promise((resolve) => window.setTimeout(resolve, 220));
+      }
+    }
+    if (lastError) failures.push({ source, error: lastError });
+  }
+  return failures;
+}
+
+async function registerStrudelDrumAliases(api) {
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await api.aliasBank(STRUDEL_DRUM_ALIAS_MAP_URL);
+      return null;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 0) await new Promise((resolve) => window.setTimeout(resolve, 220));
+    }
+  }
+  return lastError;
+}
+
 class StrudelRuntime {
   constructor() {
     this.api = null;
@@ -1349,6 +1387,7 @@ class StrudelRuntime {
     this.analyser = null;
     this.analyserSource = null;
     this.soundfontCount = 0;
+    this.soundLoadWarnings = [];
   }
 
   setState(message, state = "") {
@@ -1382,20 +1421,15 @@ class StrudelRuntime {
 
       window.sliderWithID = window.sliderWithID || ((_id, value) => Number(value));
       this.setState("正在加载完整采样、鼓机、GM 乐器与波表音色…", "loading");
-      const [sampleResults, soundfontCount] = await Promise.all([
-        Promise.allSettled(STRUDEL_SAMPLE_MAPS.map(({ url, baseUrl, tag }) => (
-          api.samples(url, baseUrl, { prebake: true, ...(tag ? { tag } : {}) })
-        ))),
-        registerStrudelSoundfonts(api),
+      const [failedSampleMaps, soundfontResult] = await Promise.all([
+        registerStrudelSampleMaps(api),
+        registerStrudelSoundfonts(api).then(
+          (count) => ({ count, error: null }),
+          (error) => ({ count: 0, error }),
+        ),
       ]);
-      const failedSampleMaps = sampleResults
-        .map((result, index) => ({ result, source: STRUDEL_SAMPLE_MAPS[index].url }))
-        .filter(({ result }) => result.status === "rejected");
-      if (failedSampleMaps.length) {
-        const failedNames = failedSampleMaps.map(({ source }) => source.split("/").pop()).join("、");
-        throw new Error(`Strudel 音色表加载失败：${failedNames}`);
-      }
-      await api.aliasBank(STRUDEL_DRUM_ALIAS_MAP_URL);
+      const aliasError = await registerStrudelDrumAliases(api);
+      const soundfontCount = soundfontResult.count;
       const requiredSounds = [
         "piano",
         "harmonica",
@@ -1407,16 +1441,27 @@ class StrudelRuntime {
         "wt_digital_bad_day",
       ];
       const missingSounds = requiredSounds.filter((name) => !api.getSound(name));
-      if (missingSounds.length) throw new Error(`以下 Strudel 音色没有注册成功：${missingSounds.join("、")}`);
-      Promise.allSettled(STRUDEL_OPTIONAL_SAMPLE_MAPS.map((url) => api.samples(url)))
-        .catch(() => {});
+      const warnings = [];
+      if (failedSampleMaps.length) {
+        warnings.push(`未载入 ${failedSampleMaps.map(({ source }) => source.url.split("/").pop()).join("、")}`);
+      }
+      if (soundfontResult.error) warnings.push("GM 乐器清单暂时不可用");
+      if (aliasError) warnings.push("鼓机别名暂时不可用");
+      if (missingSounds.length) warnings.push(`缺少 ${missingSounds.join("、")}`);
+      await Promise.allSettled(STRUDEL_OPTIONAL_SAMPLE_MAPS.map((url) => api.samples(url)));
 
       this.api = api;
       this.repl = repl;
       this.soundfontCount = soundfontCount;
+      this.soundLoadWarnings = warnings;
       this.ready = true;
       this.connectAnalyser();
-      this.setState(`完整 Strudel 音色库 · 已就绪（${soundfontCount} 组 GM 乐器）`, "ready");
+      this.setState(
+        warnings.length
+          ? `Strudel 音色库 · 已载入可用声音（${warnings.length} 项网络源待重试）`
+          : `完整 Strudel 音色库 · 已就绪（${soundfontCount} 组 GM 乐器）`,
+        "ready",
+      );
       return api;
     })();
 
@@ -2410,6 +2455,183 @@ function showToast(message) {
   toastTimer = window.setTimeout(() => toast.classList.remove("show"), 2200);
 }
 
+const SOUND_BROWSER_CATEGORIES = ["instruments", "drums", "synths", "wavetables"];
+
+function getSoundVariantCount(data = {}) {
+  const variants = data.samples || data.tables || data.fonts;
+  if (Array.isArray(variants)) return Math.max(1, variants.length);
+  if (variants && typeof variants === "object") {
+    const count = Object.values(variants).reduce((total, value) => (
+      total + (Array.isArray(value) ? value.length : 1)
+    ), 0);
+    return Math.max(1, count);
+  }
+  return 1;
+}
+
+function getSoundBrowserCategory(entry) {
+  const type = entry?.data?.type;
+  if (type === "wavetable") return "wavetables";
+  if (type === "sample") return entry.data.tag === "drum-machines" ? "drums" : "instruments";
+  if (type === "soundfont" || type === "synth" || type === "zzfx") return "synths";
+  return null;
+}
+
+function collectSoundBrowserEntries() {
+  const soundMap = strudelRuntime.api?.soundMap?.get?.() || {};
+  const categories = Object.fromEntries(SOUND_BROWSER_CATEGORIES.map((category) => [category, []]));
+  const seen = new Set();
+
+  Object.entries(soundMap).forEach(([name, entry]) => {
+    const normalizedName = String(name || "").toLowerCase();
+    if (!normalizedName || normalizedName.startsWith("_") || seen.has(normalizedName) || normalizedName === "bus" || normalizedName === "user") return;
+    const category = getSoundBrowserCategory(entry);
+    if (!category) return;
+    seen.add(normalizedName);
+    categories[category].push({
+      name: normalizedName,
+      type: entry.data.type,
+      variants: getSoundVariantCount(entry.data),
+    });
+  });
+
+  SOUND_BROWSER_CATEGORIES.forEach((category) => {
+    categories[category].sort((left, right) => left.name.localeCompare(right.name, "en", { numeric: true }));
+  });
+  return categories;
+}
+
+function setSoundAccordionOpen(trigger, open) {
+  const content = document.getElementById(trigger.getAttribute("aria-controls"));
+  trigger.setAttribute("aria-expanded", String(open));
+  if (content) content.hidden = !open;
+  if (open && content?.id === "soundPulseContent") {
+    window.requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
+  }
+}
+
+function renderSoundBrowser(query = "") {
+  if (!strudelRuntime.ready) return;
+  const categories = collectSoundBrowserEntries();
+  const normalizedQuery = String(query || "").trim().toLowerCase();
+  let totalSounds = 0;
+
+  SOUND_BROWSER_CATEGORIES.forEach((category) => {
+    const allEntries = categories[category];
+    const entries = normalizedQuery
+      ? allEntries.filter((entry) => entry.name.includes(normalizedQuery))
+      : allEntries;
+    totalSounds += allEntries.length;
+    const list = $(`[data-sound-list="${category}"]`);
+    const count = $(`[data-sound-count="${category}"]`);
+    if (!list || !count) return;
+    count.textContent = normalizedQuery ? `${entries.length}/${allEntries.length} 种` : `${allEntries.length} 种`;
+    list.replaceChildren();
+
+    if (!entries.length) {
+      const empty = document.createElement("div");
+      empty.className = "sound-empty";
+      empty.textContent = normalizedQuery ? "没有匹配的声音" : "此分类暂无声音";
+      list.append(empty);
+    } else {
+      const fragment = document.createDocumentFragment();
+      entries.forEach((entry) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "sound-chip";
+        button.dataset.soundName = entry.name;
+        button.dataset.soundType = entry.type;
+        button.dataset.soundVariants = String(entry.variants);
+        button.dataset.previewIndex = "0";
+        button.textContent = entry.variants > 1 ? `${entry.name} (${entry.variants})` : entry.name;
+        button.title = entry.variants > 1
+          ? `点击试听 ${entry.name}，连续点击可轮换 ${entry.variants} 个声音`
+          : `点击试听 ${entry.name}`;
+        fragment.append(button);
+      });
+      list.append(fragment);
+    }
+
+    if (normalizedQuery && entries.length) {
+      const trigger = $(`[data-sound-section="${category}"] .sound-accordion-trigger`);
+      if (trigger) setSoundAccordionOpen(trigger, true);
+    }
+  });
+
+  $("#soundLibraryStatus").textContent = normalizedQuery ? `正在筛选 · ${totalSounds} 种` : `${totalSounds} 种可试听音色`;
+}
+
+async function preloadSoundPreview(api, sound, value, variantIndex) {
+  const data = sound.data || {};
+  if (data.type === "soundfont") {
+    const fonts = Array.isArray(data.fonts) ? data.fonts : [];
+    const font = fonts.length ? fonts[variantIndex % fonts.length] : null;
+    if (font) await getStrudelSoundfontBuffer(font, api.noteToMidi("c4"), api.getAudioContext());
+    return;
+  }
+  if (data.type === "wavetable") {
+    if (typeof api.loadWorklets === "function") await api.loadWorklets();
+    const tables = Array.isArray(data.tables) ? data.tables : [];
+    const table = tables.length ? tables[variantIndex % tables.length] : null;
+    if (table) {
+      const response = await fetch(table);
+      if (!response.ok) throw new Error(`波表下载失败（${response.status}）`);
+      await response.arrayBuffer();
+    }
+    return;
+  }
+  if (data.type === "sample" && typeof api.getSampleBuffer === "function" && data.samples) {
+    await api.getSampleBuffer({ s: value.s, n: value.n, speed: 1 }, data.samples);
+  }
+}
+
+async function previewSoundFromBrowser(button) {
+  if (!button || button.classList.contains("is-loading")) return;
+  const name = button.dataset.soundName;
+  const variants = Math.max(1, Number(button.dataset.soundVariants) || 1);
+  const variantIndex = (Number(button.dataset.previewIndex) || 0) % variants;
+  button.classList.add("is-loading");
+  $("#soundPreviewStatus").textContent = `正在加载 ${name}…`;
+
+  try {
+    const api = await strudelRuntime.ensure();
+    const sound = api.getSound(name);
+    if (!sound) throw new Error(`找不到声音 ${name}`);
+    const type = sound.data?.type;
+    const context = api.getAudioContext();
+    await context.resume();
+    const duration = type === "sample" && sound.data?.tag === "drum-machines" ? 0.7 : type === "synth" ? 0.9 : 1.2;
+    const value = {
+      s: name,
+      n: variantIndex,
+      gain: 0.72,
+      velocity: 0.9,
+      attack: 0.005,
+      release: 0.12,
+    };
+    if (type === "synth" || type === "soundfont" || type === "wavetable") value.note = "c4";
+    await preloadSoundPreview(api, sound, value, variantIndex);
+    await api.superdough(value, context.currentTime + 0.08, duration, composition.bpm / 60 / 4);
+
+    $$(".sound-chip.is-playing").forEach((item) => item.classList.remove("is-playing"));
+    button.classList.add("is-playing");
+    button.dataset.previewIndex = String((variantIndex + 1) % variants);
+    const variantLabel = variants > 1 ? ` · ${variantIndex + 1}/${variants}` : "";
+    $("#soundPreviewStatus").textContent = `正在试听 ${name}${variantLabel}`;
+    window.clearTimeout(soundPreviewClearTimer);
+    soundPreviewClearTimer = window.setTimeout(() => {
+      button.classList.remove("is-playing");
+      $("#soundPreviewStatus").textContent = "点击音色即可试听";
+    }, Math.max(900, duration * 1000 + 260));
+  } catch (error) {
+    console.warn(`无法试听声音 ${name}`, error);
+    $("#soundPreviewStatus").textContent = `${name} 试听失败`;
+    showToast(`无法试听 ${name}，请检查网络后重试`);
+  } finally {
+    button.classList.remove("is-loading");
+  }
+}
+
 function setupVisualizer() {
   const canvas = $("#visualizer");
   const context = canvas.getContext("2d");
@@ -2601,6 +2823,21 @@ function initEvents() {
     $$(".scope-switch button").forEach((item) => item.classList.toggle("active", item === button));
   }));
 
+  $("#soundSearchInput").addEventListener("input", (event) => {
+    window.clearTimeout(soundSearchTimer);
+    soundSearchTimer = window.setTimeout(() => renderSoundBrowser(event.target.value), 80);
+  });
+  $(".sound-browser-panel").addEventListener("click", (event) => {
+    const soundButton = event.target.closest(".sound-chip");
+    if (soundButton) {
+      previewSoundFromBrowser(soundButton);
+      return;
+    }
+    const trigger = event.target.closest(".sound-root-trigger, .sound-accordion-trigger");
+    if (!trigger) return;
+    setSoundAccordionOpen(trigger, trigger.getAttribute("aria-expanded") !== "true");
+  });
+
   $("#copyBtn").addEventListener("click", async () => {
     const editor = $("#codeEditor");
     try {
@@ -2659,9 +2896,15 @@ function init() {
   refreshMiniMaxStatus();
   setupVisualizer();
   if (window.strudel && typeof (window.initStrudel || window.strudel.initStrudel) === "function") {
-    strudelRuntime.ensure().catch((error) => console.warn("官方 Strudel 初始化失败", error));
+    strudelRuntime.ensure()
+      .then(() => renderSoundBrowser())
+      .catch((error) => {
+        $("#soundLibraryStatus").textContent = "音色加载失败";
+        console.warn("官方 Strudel 初始化失败", error);
+      });
   } else {
     strudelRuntime.setState("官方 Strudel 音频引擎加载失败 · 请刷新页面", "error");
+    $("#soundLibraryStatus").textContent = "音色引擎不可用";
   }
   if (restored) window.setTimeout(() => showToast("已恢复上次保存的项目"), 200);
 }
