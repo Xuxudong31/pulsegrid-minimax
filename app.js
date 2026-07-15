@@ -1608,10 +1608,19 @@ function applyMiniMaxComposition(result, prompt) {
   composition.drumLabel = STYLE_PRESETS[base.id].drumLabel;
   composition.bassLabel = STYLE_PRESETS[base.id].bassLabel;
   composition.chordLabel = STYLE_PRESETS[base.id].chordLabel;
-  composition.leadLabel = STYLE_PRESETS[base.id].leadLabel;
-  $("#codeEditor").value = code;
+  composition.leadInstrument = result.leadInstrument || "synth";
+  composition.leadLabel = result.leadInstrumentLabel
+    ? `${result.leadInstrumentLabel} / 主旋律`
+    : STYLE_PRESETS[base.id].leadLabel;
+  const editor = $("#codeEditor");
+  editor.value = code;
+  editor.classList.remove("ai-updated");
+  void editor.offsetWidth;
+  editor.classList.add("ai-updated");
+  window.setTimeout(() => editor.classList.remove("ai-updated"), 1300);
   updateCompositionUI({ preserveCode: true });
   setEditorDirty(true);
+  showToast(`主作品代码已更新${result.leadInstrumentLabel ? ` · ${result.leadInstrumentLabel}` : ""}`);
 }
 
 async function refreshMiniMaxStatus() {
@@ -1650,7 +1659,7 @@ async function generateFromPrompt(rawPrompt) {
     await strudelRuntime.run($("#codeEditor").value);
 
     const extra = `<div class="composition-summary"><span>每分钟 ${composition.bpm} 拍</span><span>${escapeHTML(localizeKey(composition.key))}</span><span>${escapeHTML(composition.label)}</span></div>`;
-    addMessage("agent", `<p>${escapeHTML(result.reply || "MiniMax 已完成编曲，真实 Strudel 轨道已经开始运行。")}</p><p class="muted-copy">由 ${escapeHTML(result.provider)} ${escapeHTML(result.model)} 编曲，官方 Strudel 网页音频引擎演奏。</p>`, extra);
+    addMessage("agent", `<p>${escapeHTML(result.reply || "MiniMax 已完成编曲，真实 Strudel 轨道已经开始运行。")}</p><p class="muted-copy">主作品代码已自动覆盖并保存；由 ${escapeHTML(result.provider)} ${escapeHTML(result.model)} 编曲，官方 Strudel 网页音频引擎演奏。</p>`, extra);
     setEditorStatus("MiniMax 智能编曲 · 官方 Strudel 正在演奏");
     try {
       localStorage.setItem("pulsegrid.last", JSON.stringify({ prompt, composition: { bpm: composition.bpm, key: composition.key, id: composition.id } }));

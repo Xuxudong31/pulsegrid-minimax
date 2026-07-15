@@ -13,6 +13,33 @@ const MAX_BODY_BYTES = 120_000;
 const STYLES = new Set(["house", "techno", "lofi", "ambient", "synthwave", "trance", "dnb", "trap"]);
 const BANKS = new Set(["RolandTR909", "RolandTR808", "RolandTR707", "AkaiLinn"]);
 const SYNTHS = new Set(["sine", "triangle", "square", "sawtooth", "supersaw", "pulse"]);
+const LEAD_INSTRUMENTS = Object.freeze({
+  synth: { label: "合成器", sound: null, envelope: ".attack(0.01).decay(0.16).sustain(0.06).release(0.2)", color: "" },
+  harmonica: { label: "口琴", sound: "square", envelope: ".attack(0.04).decay(0.18).sustain(0.72).release(0.38)", color: ".vib(5.5).vibmod(0.12)" },
+  flute: { label: "长笛", sound: "wt_flute", envelope: ".attack(0.05).decay(0.2).sustain(0.62).release(0.45)", color: ".vib(4.8).vibmod(0.08)" },
+  sax: { label: "萨克斯", sound: "sax", envelope: ".attack(0.03).decay(0.2).sustain(0.65).release(0.4)", color: ".vib(5).vibmod(0.1)" },
+  sitar: { label: "西塔琴", sound: "sitar", envelope: ".attack(0.01).decay(0.32).sustain(0.12).release(0.5)", color: "" },
+  piano: { label: "钢琴", sound: "wt_piano", envelope: ".attack(0.01).decay(0.5).sustain(0.24).release(0.55)", color: "" },
+  guitar: { label: "吉他", sound: "pluck", envelope: ".attack(0.01).decay(0.3).sustain(0.16).release(0.45)", color: "" },
+  violin: { label: "小提琴", sound: "sawtooth", envelope: ".attack(0.12).decay(0.2).sustain(0.7).release(0.55)", color: ".vib(5.2).vibmod(0.1)" },
+  cello: { label: "大提琴", sound: "triangle", envelope: ".attack(0.14).decay(0.25).sustain(0.75).release(0.65)", color: ".vib(4.5).vibmod(0.08)" },
+  trumpet: { label: "小号", sound: "sawtooth", envelope: ".attack(0.06).decay(0.18).sustain(0.68).release(0.35)", color: ".vib(5).vibmod(0.08)" },
+  clarinet: { label: "单簧管", sound: "square", envelope: ".attack(0.07).decay(0.2).sustain(0.68).release(0.42)", color: ".vib(4.6).vibmod(0.06)" },
+  marimba: { label: "马林巴", sound: "sine", envelope: ".attack(0.005).decay(0.42).sustain(0.04).release(0.32)", color: ".fm(1.5).fmh(3)" },
+});
+const LEAD_INSTRUMENT_ALIASES = [
+  ["harmonica", /口琴|harmonica|blues\s+harp/i],
+  ["flute", /长笛|笛子|flute/i],
+  ["sax", /萨克斯|sax(?:ophone)?/i],
+  ["sitar", /西塔琴|sitar/i],
+  ["piano", /钢琴|piano/i],
+  ["guitar", /吉他|guitar/i],
+  ["violin", /小提琴|violin/i],
+  ["cello", /大提琴|cello/i],
+  ["trumpet", /小号|trumpet/i],
+  ["clarinet", /单簧管|黑管|clarinet/i],
+  ["marimba", /马林巴|marimba/i],
+];
 const ROOT_MIDI = { C: 36, "C#": 37, Db: 37, D: 38, "D#": 39, Eb: 39, E: 40, F: 41, "F#": 42, Gb: 42, G: 43, "G#": 44, Ab: 44, A: 45, "A#": 46, Bb: 46, B: 47 };
 const NOTE_NAMES = ["c", "cs", "d", "ds", "e", "f", "fs", "g", "gs", "a", "as", "b"];
 const MIME_TYPES = {
@@ -60,6 +87,7 @@ const SYSTEM_PROMPT = `你是脉冲音格的电子音乐编曲智能体。你要
   "bassSynth": "sine|triangle|square|sawtooth|supersaw|pulse",
   "chordSynth": "sine|triangle|square|sawtooth|supersaw|pulse",
   "leadSynth": "sine|triangle|square|sawtooth|supersaw|pulse",
+  "leadInstrument": "synth|harmonica|flute|sax|sitar|piano|guitar|violin|cello|trumpet|clarinet|marimba",
   "tone": 200到6000的整数,
   "resonance": 0到20的数字,
   "room": 0到1的数字,
@@ -67,7 +95,7 @@ const SYSTEM_PROMPT = `你是脉冲音格的电子音乐编曲智能体。你要
   "volumes": {"drums":0到1,"bass":0到1,"chords":0到1,"lead":0到1}
 }
 
-编曲规则：节奏数组必须正好16格；调性、低音、和弦与旋律要相互匹配；遵守用户指定的 BPM、风格和乐器；如果用户说“不要某轨”，将该轨节奏全设为0且音量设为0。用户常会在当前作品上继续说“低音更重”“更暗”等，遇到这种修改指令要保留未被要求改变的部分。不要使用 GM 乐器。`;
+编曲规则：节奏数组必须正好16格；调性、低音、和弦与旋律要相互匹配；遵守用户指定的 BPM、风格和乐器；如果用户明确要求口琴、长笛、萨克斯等乐器，必须把对应英文枚举写入 leadInstrument，不能只在 reply 中声称已经添加；如果用户说“不要某轨”，将该轨节奏全设为0且音量设为0。用户常会在当前作品上继续说“低音更重”“更暗”等，遇到这种修改指令要保留未被要求改变的部分。每次都返回完整的新编曲计划，确保主作品代码可以被整体覆盖。不要使用 GM 乐器。`;
 
 function readEnv(file) {
   const values = {};
@@ -168,6 +196,25 @@ function normalizeRhythm(value, fallbackSteps) {
   return value.map((item) => Number(item) > 0 ? 1 : 0);
 }
 
+function normalizeLeadInstrument(value) {
+  const normalized = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (Object.hasOwn(LEAD_INSTRUMENTS, normalized)) return normalized;
+  const alias = LEAD_INSTRUMENT_ALIASES.find(([, pattern]) => pattern.test(String(value || "")));
+  return alias?.[0] || "synth";
+}
+
+function detectRequestedLeadInstrument(prompt) {
+  const text = String(prompt || "");
+  for (const [instrument, pattern] of LEAD_INSTRUMENT_ALIASES) {
+    const match = pattern.exec(text);
+    if (!match) continue;
+    const prefix = text.slice(Math.max(0, match.index - 8), match.index);
+    if (/(不要|移除|去掉|取消|without|remove)\s*$/i.test(prefix)) continue;
+    return instrument;
+  }
+  return null;
+}
+
 function normalizePlan(raw) {
   const style = STYLES.has(raw?.style) ? raw.style : "house";
   const defaults = STYLE_DEFAULTS[style];
@@ -197,6 +244,7 @@ function normalizePlan(raw) {
     bassSynth: SYNTHS.has(raw?.bassSynth) ? raw.bassSynth : style === "ambient" ? "sine" : "sawtooth",
     chordSynth: SYNTHS.has(raw?.chordSynth) ? raw.chordSynth : style === "trance" ? "supersaw" : "triangle",
     leadSynth: SYNTHS.has(raw?.leadSynth) ? raw.leadSynth : style === "synthwave" ? "square" : "sawtooth",
+    leadInstrument: normalizeLeadInstrument(raw?.leadInstrument),
     tone: Math.round(clamp(raw?.tone, 200, 6000, style === "techno" ? 1100 : 2600)),
     resonance: clamp(raw?.resonance, 0, 20, style === "techno" ? 14 : 6),
     room: clamp(raw?.room, 0, 1, style === "ambient" ? 0.82 : 0.5),
@@ -220,8 +268,11 @@ function fixed(value) {
 
 function buildStrudelCode(plan) {
   const chord = plan.chordNotes.join(",");
+  const leadInstrument = LEAD_INSTRUMENTS[plan.leadInstrument] || LEAD_INSTRUMENTS.synth;
+  const leadSound = leadInstrument.sound || plan.leadSynth;
   return [
     `// DJ OPUS / 脉冲音格 / ${plan.title}`,
+    ...(plan.request ? [`// AI 修改：${plan.request}`] : []),
     `setcps(${plan.bpm} / 60 / 4)`,
     "",
     'let masterVol = slider(0.78, 0, 1, 0.01, "总音量")',
@@ -245,9 +296,11 @@ function buildStrudelCode(plan) {
     `  note("[${chord}]")`,
     `    .s("${plan.chordSynth}").slow(4).attack(0.3).release(1.4)`,
     `    .cutoff(${Math.round(plan.tone * 0.72)}).room(${fixed(plan.room)}).gain(chordsVol),`,
+    `  // 主旋律乐器：${leadInstrument.label}`,
     `  note("<${plan.leadNotes.join(" ")}>")`,
-    `    .s("${plan.leadSynth}").struct("${miniPattern(plan.leadRhythm, "x")}")`,
-    "    .attack(0.01).decay(0.16).sustain(0.06).release(0.2)",
+    `    .s("${leadSound}").struct("${miniPattern(plan.leadRhythm, "x")}")`,
+    `    ${leadInstrument.envelope}`,
+    ...(leadInstrument.color ? [`    ${leadInstrument.color}`] : []),
     `    .cutoff(${plan.tone}).delay(${fixed(plan.delay)}).room(${fixed(Math.min(0.9, plan.room + 0.1))}).gain(leadVol)`,
     ").gain(masterVol)",
   ].join("\n");
@@ -327,6 +380,10 @@ async function composeWithMiniMax(prompt, currentCode) {
     raw = parseModelJson(content);
   }
   const plan = normalizePlan(raw);
+  const requestedInstrument = detectRequestedLeadInstrument(prompt);
+  if (requestedInstrument) plan.leadInstrument = requestedInstrument;
+  plan.request = safeText(prompt, "更新编曲", 72);
+  const leadInstrument = LEAD_INSTRUMENTS[plan.leadInstrument] || LEAD_INSTRUMENTS.synth;
   return {
     provider: "MiniMax",
     model: config.model,
@@ -335,6 +392,8 @@ async function composeWithMiniMax(prompt, currentCode) {
     style: plan.style,
     bpm: plan.bpm,
     key: plan.key,
+    leadInstrument: plan.leadInstrument,
+    leadInstrumentLabel: leadInstrument.label,
     code: buildStrudelCode(plan),
   };
 }
