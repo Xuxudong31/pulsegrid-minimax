@@ -667,6 +667,36 @@ function expressionStringArgument(expression, callName) {
   return match?.[1] ?? null;
 }
 
+function sliderValuesFromCode(code) {
+  const sliders = {};
+  for (const match of String(code || "").matchAll(/\b(?:let|const)\s+(\w+)\s*=\s*slider\(\s*(-?\d+(?:\.\d+)?)/g)) {
+    sliders[match[1]] = Number(match[2]);
+  }
+  return sliders;
+}
+
+function inferInstrumentTrackFromCode(trackId, volume, code, existingTrack = null) {
+  const stackBody = extractCallBody(code, "stack") || "";
+  const expression = splitTopLevelExpressions(stackBody)
+    .find((item) => new RegExp(`\\.gain\\(\\s*${trackId}Vol\\s*\\)`).test(item));
+  const notePattern = expression ? expressionStringArgument(expression, "note") : "";
+  const notes = notePattern?.match(/[a-gA-G](?:#|b|s)?-?\d+/g)?.slice(0, 8) || existingTrack?.notes || [];
+  const struct = expression ? expressionStringArgument(expression, "struct") : null;
+  const steps = struct === null
+    ? (expression ? [0] : existingTrack?.steps || [])
+    : miniPatternToSteps(struct);
+  const rhythm = Array.from({ length: 16 }, (_, index) => steps.includes(index) ? 1 : 0);
+  return {
+    id: trackId,
+    instrument: trackId,
+    notes,
+    rhythm,
+    steps,
+    volume: Math.max(0, Math.min(1, volume)),
+    muted: volume === 0,
+  };
+}
+
 function parsePatternCode(code, currentComposition = composition) {
   const validation = validatePatternCode(code);
   if (validation.errors.length) return { errors: validation.errors, composition: null };
@@ -693,10 +723,7 @@ function parsePatternCode(code, currentComposition = composition) {
   const keyMatch = code.match(/\.scale\(\s*"([A-Ga-g])([#b]?):(minor|major)"\s*\)/);
   if (keyMatch) next.key = `${keyMatch[1].toUpperCase()}${keyMatch[2] || ""} ${keyMatch[3]}`;
 
-  const sliders = {};
-  for (const match of code.matchAll(/\b(?:let|const)\s+(\w+)\s*=\s*slider\(\s*(-?\d+(?:\.\d+)?)/g)) {
-    sliders[match[1]] = Number(match[2]);
-  }
+  const sliders = sliderValuesFromCode(code);
   const volumeVariables = { drums: "drumsVol", bass: "bassVol", chords: "chordsVol", lead: "leadVol" };
   Object.entries(volumeVariables).forEach(([track, variable]) => {
     if (!Number.isFinite(sliders[variable])) return;
@@ -1172,6 +1199,7 @@ class StrudelRuntime {
 const audio = new AudioEngine();
 const strudelRuntime = new StrudelRuntime();
 let mixerRunTimer;
+let sliderCardSyncTimer;
 let projectAutoSaveTimer;
 
 function normalizeClientInstrumentTracks(value) {
@@ -1198,6 +1226,54 @@ function normalizeClientInstrumentTracks(value) {
       muted: Boolean(item.muted),
     }];
   }).slice(0, 6);
+}
+
+function syncMixerCardsFromSliderCode(code, { removeMissing = false, render = true } = {}) {
+  const sliders = sliderValuesFromCode(code);
+  const declaredTracks = new Set();
+  let changed = false;
+
+  BASE_TRACK_IDS.forEach((track) => {
+    const value = sliders[`${track}Vol`];
+    if (Number.isFinite(value)) {
+      declaredTracks.add(track);
+      const nextVolume = Math.max(0, Math.min(1, value));
+      if (composition.volumes[track] !== nextVolume || composition.muted[track] !== (nextVolume === 0)) changed = true;
+      composition.volumes[track] = nextVolume;
+      composition.muted[track] = nextVolume === 0;
+    } else if (removeMissing && !composition.deletedTracks?.includes(track)) {
+      composition.deletedTracks = [...(composition.deletedTracks || []), track];
+      changed = true;
+    }
+  });
+
+  Object.keys(INSTRUMENT_TRACK_META).forEach((trackId) => {
+    const value = sliders[`${trackId}Vol`];
+    const existing = composition.instrumentTracks?.find((track) => track.id === trackId) || null;
+    if (Number.isFinite(value)) {
+      declaredTracks.add(trackId);
+      const inferred = inferInstrumentTrackFromCode(trackId, value, code, existing);
+      if (existing) {
+        if (existing.volume !== inferred.volume || existing.muted !== inferred.muted
+          || existing.steps.join(",") !== inferred.steps.join(",")) changed = true;
+        Object.assign(existing, inferred);
+      } else {
+        composition.instrumentTracks = [...(composition.instrumentTracks || []), inferred];
+        changed = true;
+      }
+    } else if (removeMissing && existing) {
+      composition.instrumentTracks = composition.instrumentTracks.filter((track) => track.id !== trackId);
+      composition.deletedTracks = [...(composition.deletedTracks || []), trackId];
+      changed = true;
+    }
+  });
+
+  const previousDeleted = normalizeDeletedTracks(composition.deletedTracks);
+  composition.deletedTracks = previousDeleted.filter((track) => !declaredTracks.has(track));
+  if (composition.deletedTracks.length !== previousDeleted.length) changed = true;
+  composition.instrumentTracks = normalizeClientInstrumentTracks(composition.instrumentTracks);
+  if (render && changed) updateCompositionUI({ preserveCode: true });
+  return changed;
 }
 
 function findInstrumentTrack(trackId) {
@@ -1914,6 +1990,7 @@ function strudelErrorDetails(error) {
 
 async function parseEditorAndRun({ quiet = false } = {}) {
   const code = $("#codeEditor").value;
+  syncMixerCardsFromSliderCode(code, { removeMissing: true });
   const result = parsePatternCode(code, composition);
   if (!result.errors.length && result.composition) {
     composition = result.composition;
@@ -1959,6 +2036,13 @@ function scheduleMixerRerun() {
       setEditorStatus(`第 ${details.line} 行 · ${details.message}`, "error");
     }
   }, 120);
+}
+
+function scheduleSliderCardSync() {
+  window.clearTimeout(sliderCardSyncTimer);
+  sliderCardSyncTimer = window.setTimeout(() => {
+    syncMixerCardsFromSliderCode($("#codeEditor").value);
+  }, 180);
 }
 
 function showToast(message) {
@@ -2129,6 +2213,7 @@ function initEvents() {
     updateLineNumbers();
     setEditorDirty(true);
     setEditorStatus("已修改 · 按 Ctrl+回车运行", "pending");
+    scheduleSliderCardSync();
   });
   $("#codeEditor").addEventListener("scroll", (event) => { $("#lineNumbers").scrollTop = event.target.scrollTop; });
   $("#codeEditor").addEventListener("keydown", (event) => {
@@ -2151,6 +2236,7 @@ function initEvents() {
     updateLineNumbers();
     setEditorDirty(true);
     setEditorStatus("已修改 · 按 Ctrl+回车运行", "pending");
+    scheduleSliderCardSync();
   });
 
   $$(".scope-switch button").forEach((button) => button.addEventListener("click", () => {
