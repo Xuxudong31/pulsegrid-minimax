@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: pulsegrid-minimax
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: NODE_ENV
+        value: production
+      - key: MINIMAX_API_KEY
+        sync: false
+      - key: MINIMAX_MODEL
+        value: MiniMax-M3
+      - key: MINIMAX_BASE_URL
+        value: https://api.minimaxi.com/v1
