@@ -675,6 +675,20 @@ function sliderValuesFromCode(code) {
   return sliders;
 }
 
+function compileCodeWithMixerValues(code) {
+  const sliders = sliderValuesFromCode(code);
+  return Object.entries(sliders).reduce((compiled, [variable, value]) => {
+    if (!variable.endsWith("Vol") || !Number.isFinite(value)) return compiled;
+    const safeVariable = variable.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const volume = Math.max(0, Math.min(1, value));
+    const literal = String(Math.round(volume * 10000) / 10000);
+    return compiled.replace(
+      new RegExp(`\\.gain\\(\\s*${safeVariable}\\s*\\)`, "g"),
+      `.gain(${literal})`,
+    );
+  }, String(code || ""));
+}
+
 function inferInstrumentTrackFromCode(trackId, volume, code, existingTrack = null) {
   const stackBody = extractCallBody(code, "stack") || "";
   const expression = splitTopLevelExpressions(stackBody)
@@ -1122,7 +1136,7 @@ class StrudelRuntime {
   async run(code) {
     await this.ensure();
     this.lastEvalError = null;
-    await this.repl.evaluate(code, true);
+    await this.repl.evaluate(compileCodeWithMixerValues(code), true);
     this.connectAnalyser();
     const evalError = this.lastEvalError || this.repl.state?.evalError;
     if (evalError) {
@@ -1199,6 +1213,8 @@ class StrudelRuntime {
 const audio = new AudioEngine();
 const strudelRuntime = new StrudelRuntime();
 let mixerRunTimer;
+let mixerRunInFlight = false;
+let mixerRerunQueued = false;
 let sliderCardSyncTimer;
 let projectAutoSaveTimer;
 
@@ -1400,7 +1416,7 @@ function updateCompositionUI({ preserveCode = false } = {}) {
     input.nextElementSibling.value = Math.round(state.volume * 100);
     updateRangeFill(input);
     input.closest(".track-card").classList.toggle("muted", state.muted);
-    input.closest(".track-card").classList.toggle("empty", !state.hasPattern);
+    input.closest(".track-card").classList.remove("empty");
     $(`.mute-btn[data-track="${track}"]`)?.classList.toggle("active", state.muted);
     if (audio.trackGains[track]) audio.setMuted(track, state.muted);
   });
@@ -1670,6 +1686,7 @@ function flushProjectAutoSave() {
 function stopForProjectChange() {
   if (mixerRunTimer) window.clearTimeout(mixerRunTimer);
   mixerRunTimer = null;
+  mixerRerunQueued = false;
   strudelRuntime.stop();
 }
 
@@ -2026,22 +2043,39 @@ function replaceSliderDefault(variable, value) {
 
 function scheduleMixerRerun() {
   if (!strudelRuntime.playing) return;
-  window.clearTimeout(mixerRunTimer);
+  if (mixerRunTimer || mixerRunInFlight) {
+    mixerRerunQueued = true;
+    return;
+  }
   mixerRunTimer = window.setTimeout(async () => {
+    mixerRunTimer = null;
+    if (!strudelRuntime.playing) {
+      mixerRerunQueued = false;
+      return;
+    }
+    mixerRunInFlight = true;
     try {
       await strudelRuntime.run($("#codeEditor").value);
       setEditorStatus("官方 Strudel · 混音已同步");
     } catch (error) {
       const details = strudelErrorDetails(error);
       setEditorStatus(`第 ${details.line} 行 · ${details.message}`, "error");
+    } finally {
+      mixerRunInFlight = false;
+      if (mixerRerunQueued && strudelRuntime.playing) {
+        mixerRerunQueued = false;
+        scheduleMixerRerun();
+      } else {
+        mixerRerunQueued = false;
+      }
     }
-  }, 120);
+  }, 70);
 }
 
 function scheduleSliderCardSync() {
   window.clearTimeout(sliderCardSyncTimer);
   sliderCardSyncTimer = window.setTimeout(() => {
-    syncMixerCardsFromSliderCode($("#codeEditor").value);
+    syncMixerCardsFromSliderCode($("#codeEditor").value, { removeMissing: true });
   }, 180);
 }
 
