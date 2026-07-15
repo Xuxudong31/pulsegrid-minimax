@@ -119,6 +119,58 @@
         </form>
       </aside>
 
+      <section class="mixer-section panel" aria-label="声音分轨">
+        <header class="section-heading">
+          <div>
+            <span class="panel-kicker">会话混音台</span>
+            <h2>声音分轨</h2>
+          </div>
+          <div class="section-meta"><span class="online-dot"></span> <span id="activeTrackCount">4 条轨道启用</span></div>
+        </header>
+        <div class="track-grid" id="trackGrid">
+          <article class="track-card" data-track="drums">
+            <header><span class="track-index">01</span><span class="track-led coral"></span></header>
+            <div class="track-name"><strong>鼓组</strong><span id="drumLabel">909 / 俱乐部</span></div>
+            <div class="step-row coral-steps" aria-hidden="true"></div>
+            <div class="track-controls">
+              <button class="mute-btn" data-track="drums" aria-label="鼓组静音">静</button>
+              <input type="range" class="track-volume" data-track="drums" min="0" max="1" step="0.01" value="0.82" aria-label="鼓组音量" />
+              <output>82</output>
+            </div>
+          </article>
+          <article class="track-card" data-track="bass">
+            <header><span class="track-index">02</span><span class="track-led violet"></span></header>
+            <div class="track-name"><strong>贝斯</strong><span id="bassLabel">次低音 / 锯齿波</span></div>
+            <div class="step-row violet-steps" aria-hidden="true"></div>
+            <div class="track-controls">
+              <button class="mute-btn" data-track="bass" aria-label="贝斯静音">静</button>
+              <input type="range" class="track-volume" data-track="bass" min="0" max="1" step="0.01" value="0.62" aria-label="贝斯音量" />
+              <output>62</output>
+            </div>
+          </article>
+          <article class="track-card" data-track="chords">
+            <header><span class="track-index">03</span><span class="track-led mint"></span></header>
+            <div class="track-name"><strong>和弦</strong><span id="chordLabel">小七和弦 / 铺底</span></div>
+            <div class="step-row mint-steps" aria-hidden="true"></div>
+            <div class="track-controls">
+              <button class="mute-btn" data-track="chords" aria-label="和弦静音">静</button>
+              <input type="range" class="track-volume" data-track="chords" min="0" max="1" step="0.01" value="0.45" aria-label="和弦音量" />
+              <output>45</output>
+            </div>
+          </article>
+          <article class="track-card" data-track="lead">
+            <header><span class="track-index">04</span><span class="track-led amber"></span></header>
+            <div class="track-name"><strong>主旋律</strong><span id="leadLabel">拨弦 / 延迟</span></div>
+            <div class="step-row amber-steps" aria-hidden="true"></div>
+            <div class="track-controls">
+              <button class="mute-btn" data-track="lead" aria-label="主旋律静音">静</button>
+              <input type="range" class="track-volume" data-track="lead" min="0" max="1" step="0.01" value="0.38" aria-label="主旋律音量" />
+              <output>38</output>
+            </div>
+          </article>
+        </div>
+      </section>
+
       <section class="studio-panel">
         <header class="studio-header">
           <div class="project-meta">
@@ -220,57 +272,6 @@
             </div>
           </section>
 
-          <section class="mixer-section panel">
-            <header class="section-heading">
-              <div>
-                <span class="panel-kicker">会话混音台</span>
-                <h2>声音分轨</h2>
-              </div>
-              <div class="section-meta"><span class="online-dot"></span> <span id="activeTrackCount">4 条轨道启用</span></div>
-            </header>
-            <div class="track-grid">
-              <article class="track-card" data-track="drums">
-                <header><span class="track-index">01</span><span class="track-led coral"></span></header>
-                <div class="track-name"><strong>鼓组</strong><span id="drumLabel">909 / 俱乐部</span></div>
-                <div class="step-row coral-steps" aria-hidden="true"></div>
-                <div class="track-controls">
-                  <button class="mute-btn" data-track="drums" aria-label="鼓组静音">静</button>
-                  <input type="range" class="track-volume" data-track="drums" min="0" max="1" step="0.01" value="0.82" aria-label="鼓组音量" />
-                  <output>82</output>
-                </div>
-              </article>
-              <article class="track-card" data-track="bass">
-                <header><span class="track-index">02</span><span class="track-led violet"></span></header>
-                <div class="track-name"><strong>贝斯</strong><span id="bassLabel">次低音 / 锯齿波</span></div>
-                <div class="step-row violet-steps" aria-hidden="true"></div>
-                <div class="track-controls">
-                  <button class="mute-btn" data-track="bass" aria-label="贝斯静音">静</button>
-                  <input type="range" class="track-volume" data-track="bass" min="0" max="1" step="0.01" value="0.62" aria-label="贝斯音量" />
-                  <output>62</output>
-                </div>
-              </article>
-              <article class="track-card" data-track="chords">
-                <header><span class="track-index">03</span><span class="track-led mint"></span></header>
-                <div class="track-name"><strong>和弦</strong><span id="chordLabel">小七和弦 / 铺底</span></div>
-                <div class="step-row mint-steps" aria-hidden="true"></div>
-                <div class="track-controls">
-                  <button class="mute-btn" data-track="chords" aria-label="和弦静音">静</button>
-                  <input type="range" class="track-volume" data-track="chords" min="0" max="1" step="0.01" value="0.45" aria-label="和弦音量" />
-                  <output>45</output>
-                </div>
-              </article>
-              <article class="track-card" data-track="lead">
-                <header><span class="track-index">04</span><span class="track-led amber"></span></header>
-                <div class="track-name"><strong>主旋律</strong><span id="leadLabel">拨弦 / 延迟</span></div>
-                <div class="step-row amber-steps" aria-hidden="true"></div>
-                <div class="track-controls">
-                  <button class="mute-btn" data-track="lead" aria-label="主旋律静音">静</button>
-                  <input type="range" class="track-volume" data-track="lead" min="0" max="1" step="0.01" value="0.38" aria-label="主旋律音量" />
-                  <output>38</output>
-                </div>
-              </article>
-            </div>
-          </section>
         </div>
       </section>
     </main>

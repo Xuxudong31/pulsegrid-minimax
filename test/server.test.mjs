@@ -51,13 +51,18 @@ test("后端只生成受控的单 stack Strudel 模式", () => {
   assert.equal((code.match(/slider\(/g) || []).length, 6);
 });
 
-test("明确要求口琴时会生成可播放的簧片主旋律代码", () => {
+test("明确要求口琴时会保留主旋律并新增独立口琴音轨", () => {
   const plan = normalizePlan({ style: "house", key: "C minor", leadInstrument: "harmonica" });
   const code = buildStrudelCode(plan);
   assert.equal(plan.leadInstrument, "harmonica");
-  assert.match(code, /主旋律乐器：口琴/);
+  assert.equal(plan.instrumentTracks[0].id, "harmonica");
+  assert.match(code, /let harmonicaVol = slider\(0\.55, 0, 1, 0\.01, "口琴"\)/);
+  assert.match(code, /原主旋律/);
+  assert.match(code, /独立乐器轨道：口琴/);
+  assert.match(code, /\.gain\(harmonicaVol\)/);
   assert.match(code, /\.s\("square"\)/);
   assert.match(code, /\.vib\(5\.5\)\.vibmod\(0\.12\)/);
+  assert.equal((code.match(/slider\(/g) || []).length, 7);
 });
 
 test("静态首页和 Strudel 运行文件可以由 Node 服务访问", async () => {
@@ -140,8 +145,11 @@ test("完整 API 链可以把 MiniMax 响应转换成可播放代码", async () 
     assert.equal(body.title, "测试律动");
     assert.match(body.code, /setcps\(132 \/ 60 \/ 4\)/);
     assert.equal(body.leadInstrument, "harmonica");
+    assert.equal(body.instrumentTracks.length, 1);
+    assert.equal(body.instrumentTracks[0].id, "harmonica");
     assert.match(body.code, /AI 修改：在现有作品里加入一段口琴主旋律/);
-    assert.match(body.code, /主旋律乐器：口琴/);
+    assert.match(body.code, /let harmonicaVol = slider/);
+    assert.match(body.code, /独立乐器轨道：口琴/);
     assert.equal(receivedUrl, "/v1/chat/completions");
     assert.equal(receivedAuthorization, "Bearer test-only-key");
   } finally {

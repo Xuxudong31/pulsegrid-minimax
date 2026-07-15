@@ -166,6 +166,20 @@ const STYLE_PRESETS = {
 
 const VOLUME_DEFAULTS = { drums: 0.82, bass: 0.62, chords: 0.45, lead: 0.38 };
 const MASTER_VOLUME_DEFAULT = 0.78;
+const INSTRUMENT_TRACK_META = Object.freeze({
+  harmonica: { label: "口琴", detail: "簧片 / 独立旋律" },
+  flute: { label: "长笛", detail: "气息 / 独立旋律" },
+  sax: { label: "萨克斯", detail: "暖管 / 独立旋律" },
+  sitar: { label: "西塔琴", detail: "拨弦 / 独立旋律" },
+  piano: { label: "钢琴", detail: "琴键 / 独立旋律" },
+  guitar: { label: "吉他", detail: "拨弦 / 独立旋律" },
+  violin: { label: "小提琴", detail: "弓弦 / 独立旋律" },
+  cello: { label: "大提琴", detail: "低弦 / 独立旋律" },
+  trumpet: { label: "小号", detail: "铜管 / 独立旋律" },
+  clarinet: { label: "单簧管", detail: "木管 / 独立旋律" },
+  marimba: { label: "马林巴", detail: "木质 / 独立旋律" },
+});
+const TRACK_COLOR_CLASSES = ["coral", "violet", "mint", "amber"];
 const LEGACY_PROJECT_STORAGE_KEY = "pulsegrid.project.v2";
 const PROJECT_LIBRARY_STORAGE_KEY = "pulsegrid.projects.v1";
 const ACTIVE_PROJECT_STORAGE_KEY = "pulsegrid.projects.active.v1";
@@ -275,6 +289,7 @@ function createComposition(prompt) {
     seed: hashString(text || preset.label),
     volumes,
     muted: { drums: volumes.drums === 0, bass: false, chords: false, lead: volumes.lead === 0 },
+    instrumentTracks: [],
     projectName: names[preset.id],
     prompt: text,
   };
@@ -1065,10 +1080,101 @@ const strudelRuntime = new StrudelRuntime();
 let mixerRunTimer;
 let projectAutoSaveTimer;
 
+function normalizeClientInstrumentTracks(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  return value.flatMap((item) => {
+    const id = String(item?.id || item?.instrument || "").trim().toLowerCase();
+    const meta = INSTRUMENT_TRACK_META[id];
+    if (!meta || seen.has(id)) return [];
+    seen.add(id);
+    const rhythm = Array.isArray(item.rhythm) && item.rhythm.length === 16
+      ? item.rhythm.map((step) => Number(step) > 0 ? 1 : 0)
+      : Array.from({ length: 16 }, (_, index) => Array.isArray(item.steps) && item.steps.includes(index) ? 1 : 0);
+    const steps = rhythm.flatMap((active, index) => active ? [index] : []);
+    const volume = Number(item.volume);
+    return [{
+      id,
+      instrument: id,
+      label: meta.label,
+      notes: Array.isArray(item.notes) ? item.notes.filter((note) => typeof note === "string").slice(0, 8) : [],
+      rhythm,
+      steps,
+      volume: Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 0.55,
+      muted: Boolean(item.muted),
+    }];
+  }).slice(0, 6);
+}
+
+function findInstrumentTrack(trackId) {
+  return composition.instrumentTracks?.find((track) => track.id === trackId) || null;
+}
+
+function getTrackMixState(trackId) {
+  const extraTrack = findInstrumentTrack(trackId);
+  if (extraTrack) {
+    return {
+      volume: extraTrack.volume,
+      muted: extraTrack.muted,
+      hasPattern: extraTrack.steps.length > 0,
+    };
+  }
+  const hasPattern = trackId === "drums"
+    ? composition.kick.length + composition.snare.length + composition.hats.length > 0
+    : trackId === "chords" ? composition.chordEnabled : Array.isArray(composition[trackId]) && composition[trackId].length > 0;
+  return {
+    volume: composition.volumes[trackId] ?? 0,
+    muted: Boolean(composition.muted[trackId]),
+    hasPattern,
+  };
+}
+
+function setTrackMixState(trackId, changes) {
+  const extraTrack = findInstrumentTrack(trackId);
+  if (extraTrack) {
+    if (Number.isFinite(changes.volume)) extraTrack.volume = Math.max(0, Math.min(1, changes.volume));
+    if (typeof changes.muted === "boolean") extraTrack.muted = changes.muted;
+    return;
+  }
+  if (Number.isFinite(changes.volume)) composition.volumes[trackId] = Math.max(0, Math.min(1, changes.volume));
+  if (typeof changes.muted === "boolean") composition.muted[trackId] = changes.muted;
+}
+
+function renderInstrumentTrackCards() {
+  const grid = $("#trackGrid");
+  if (!grid) return;
+  $$('.track-card[data-dynamic="true"]', grid).forEach((card) => card.remove());
+  composition.instrumentTracks.forEach((track, index) => {
+    const meta = INSTRUMENT_TRACK_META[track.id];
+    const color = TRACK_COLOR_CLASSES[(index + 1) % TRACK_COLOR_CLASSES.length];
+    const card = document.createElement("article");
+    card.className = "track-card";
+    card.dataset.track = track.id;
+    card.dataset.dynamic = "true";
+    card.innerHTML = `
+      <header><span class="track-index">${String(index + 5).padStart(2, "0")}</span><span class="track-led ${color}"></span></header>
+      <div class="track-name"><strong>${escapeHTML(meta.label)}</strong><span>${escapeHTML(meta.detail)}</span></div>
+      <div class="step-row ${color}-steps" aria-hidden="true"></div>
+      <div class="track-controls">
+        <button class="mute-btn" data-track="${track.id}" aria-label="${escapeHTML(meta.label)}静音">静</button>
+        <input type="range" class="track-volume" data-track="${track.id}" min="0" max="1" step="0.01" value="${track.volume}" aria-label="${escapeHTML(meta.label)}音量" />
+        <output>${Math.round(track.volume * 100)}</output>
+      </div>`;
+    grid.appendChild(card);
+  });
+}
+
 function renderSteps() {
-  const patterns = { drums: composition.kick, bass: composition.bass, chords: composition.chordEnabled ? [0, 8] : [], lead: composition.lead };
+  const patterns = {
+    drums: composition.kick,
+    bass: composition.bass,
+    chords: composition.chordEnabled ? [0, 8] : [],
+    lead: composition.lead,
+    ...Object.fromEntries(composition.instrumentTracks.map((track) => [track.id, track.steps])),
+  };
   Object.entries(patterns).forEach(([track, hits]) => {
     const row = $(`.track-card[data-track="${track}"] .step-row`);
+    if (!row) return;
     row.innerHTML = Array.from({ length: 16 }, (_, index) => {
       const height = 8 + ((composition.seed >> (index % 12)) % 17);
       return `<i class="${hits.includes(index) ? "hit" : ""}" style="--step-height:${height}px"></i>`;
@@ -1088,6 +1194,8 @@ function updateRangeFill(input) {
 }
 
 function updateCompositionUI({ preserveCode = false } = {}) {
+  composition.instrumentTracks = normalizeClientInstrumentTracks(composition.instrumentTracks);
+  renderInstrumentTrackCards();
   $("#projectTitle").textContent = composition.projectName;
   const currentProjectLabel = $("#currentProjectLabel");
   if (currentProjectLabel) currentProjectLabel.textContent = composition.projectName;
@@ -1109,24 +1217,18 @@ function updateCompositionUI({ preserveCode = false } = {}) {
 
   $$(".track-volume").forEach((input) => {
     const track = input.dataset.track;
-    input.value = composition.volumes[track];
-    input.nextElementSibling.value = Math.round(composition.volumes[track] * 100);
+    const state = getTrackMixState(track);
+    input.value = state.volume;
+    input.nextElementSibling.value = Math.round(state.volume * 100);
     updateRangeFill(input);
-    const muted = composition.muted[track];
-    const hasPattern = track === "drums"
-      ? composition.kick.length + composition.snare.length + composition.hats.length > 0
-      : track === "chords" ? composition.chordEnabled : composition[track].length > 0;
-    input.closest(".track-card").classList.toggle("muted", muted);
-    input.closest(".track-card").classList.toggle("empty", !hasPattern);
-    $(`.mute-btn[data-track="${track}"]`).classList.toggle("active", muted);
-    if (audio.trackGains[track]) audio.setMuted(track, muted);
+    input.closest(".track-card").classList.toggle("muted", state.muted);
+    input.closest(".track-card").classList.toggle("empty", !state.hasPattern);
+    $(`.mute-btn[data-track="${track}"]`)?.classList.toggle("active", state.muted);
+    if (audio.trackGains[track]) audio.setMuted(track, state.muted);
   });
-  const activeTracks = [
-    composition.kick.length + composition.snare.length + composition.hats.length > 0,
-    composition.bass.length > 0,
-    composition.chordEnabled,
-    composition.lead.length > 0,
-  ].filter(Boolean).length;
+  const activeTracks = ["drums", "bass", "chords", "lead", ...composition.instrumentTracks.map((track) => track.id)]
+    .map(getTrackMixState)
+    .filter((state) => state.hasPattern && !state.muted).length;
   $("#activeTrackCount").textContent = `${activeTracks} 条轨道启用`;
   renderSteps();
 }
@@ -1186,6 +1288,7 @@ function normalizeSavedComposition(savedComposition) {
     const muted = savedComposition.muted?.[track];
     return [track, typeof muted === "boolean" ? muted : fallback.muted[track]];
   }));
+  restored.instrumentTracks = normalizeClientInstrumentTracks(savedComposition.instrumentTracks);
   return restored;
 }
 
@@ -1575,6 +1678,7 @@ async function requestMiniMaxComposition(prompt) {
       body: JSON.stringify({
         prompt,
         currentCode: $("#codeEditor").value,
+        instrumentTracks: composition.instrumentTracks,
       }),
       signal: controller.signal,
     });
@@ -1608,10 +1712,8 @@ function applyMiniMaxComposition(result, prompt) {
   composition.drumLabel = STYLE_PRESETS[base.id].drumLabel;
   composition.bassLabel = STYLE_PRESETS[base.id].bassLabel;
   composition.chordLabel = STYLE_PRESETS[base.id].chordLabel;
-  composition.leadInstrument = result.leadInstrument || "synth";
-  composition.leadLabel = result.leadInstrumentLabel
-    ? `${result.leadInstrumentLabel} / 主旋律`
-    : STYLE_PRESETS[base.id].leadLabel;
+  composition.leadLabel = STYLE_PRESETS[base.id].leadLabel;
+  composition.instrumentTracks = normalizeClientInstrumentTracks(result.instrumentTracks);
   const editor = $("#codeEditor");
   editor.value = code;
   editor.classList.remove("ai-updated");
@@ -1620,7 +1722,8 @@ function applyMiniMaxComposition(result, prompt) {
   window.setTimeout(() => editor.classList.remove("ai-updated"), 1300);
   updateCompositionUI({ preserveCode: true });
   setEditorDirty(true);
-  showToast(`主作品代码已更新${result.leadInstrumentLabel ? ` · ${result.leadInstrumentLabel}` : ""}`);
+  const addedLabels = composition.instrumentTracks.map((track) => track.label).join("、");
+  showToast(`主作品代码和声音分轨已更新${addedLabels ? ` · ${addedLabels}` : ""}`);
 }
 
 async function refreshMiniMaxStatus() {
@@ -1889,25 +1992,28 @@ function initEvents() {
     if (replaceSliderDefault("masterVol", value)) scheduleMixerRerun();
   });
 
-  $$(".track-volume").forEach((input) => input.addEventListener("input", (event) => {
+  $("#trackGrid").addEventListener("input", (event) => {
+    if (!event.target.matches(".track-volume")) return;
     const value = Number(event.target.value);
+    const track = event.target.dataset.track;
     updateRangeFill(event.target);
     event.target.nextElementSibling.value = Math.round(value * 100);
-    const track = event.target.dataset.track;
-    composition.volumes[track] = value;
-    composition.muted[track] = false;
-    $(`.mute-btn[data-track="${track}"]`).classList.remove("active");
+    setTrackMixState(track, { volume: value, muted: false });
+    $(`.mute-btn[data-track="${track}"]`)?.classList.remove("active");
     event.target.closest(".track-card").classList.remove("muted");
     if (replaceSliderDefault(`${track}Vol`, value)) scheduleMixerRerun();
-  }));
-  $$(".mute-btn").forEach((button) => button.addEventListener("click", () => {
+  });
+  $("#trackGrid").addEventListener("click", (event) => {
+    const button = event.target.closest(".mute-btn");
+    if (!button || !event.currentTarget.contains(button)) return;
     const track = button.dataset.track;
-    const nextMuted = !composition.muted[track];
+    const state = getTrackMixState(track);
+    const nextMuted = !state.muted;
     button.classList.toggle("active", nextMuted);
     button.closest(".track-card").classList.toggle("muted", nextMuted);
-    composition.muted[track] = nextMuted;
-    if (replaceSliderDefault(`${track}Vol`, nextMuted ? 0 : composition.volumes[track])) scheduleMixerRerun();
-  }));
+    setTrackMixState(track, { muted: nextMuted });
+    if (replaceSliderDefault(`${track}Vol`, nextMuted ? 0 : state.volume)) scheduleMixerRerun();
+  });
 
   $("#codeEditor").addEventListener("input", () => {
     updateLineNumbers();
