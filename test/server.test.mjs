@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test from "node:test";
-import { buildStrudelCode, normalizePlan, parseModelJson } from "../server.mjs";
+import { buildStrudelCode, normalizePlan, parseModelJson, server as staticServer } from "../server.mjs";
 
 function listen(server) {
   return new Promise((resolve, reject) => {
@@ -49,6 +49,23 @@ test("后端只生成受控的单 stack Strudel 模式", () => {
   assert.match(code, /stack\(/);
   assert.doesNotMatch(code, /setcpm|\.mul\(|\.add\(|fetch\(|document\.|window\./);
   assert.equal((code.match(/slider\(/g) || []).length, 6);
+});
+
+test("静态首页和 Strudel 运行文件可以由 Node 服务访问", async () => {
+  const address = await listen(staticServer);
+  try {
+    const [home, runtime] = await Promise.all([
+      fetch(`http://127.0.0.1:${address.port}/`),
+      fetch(`http://127.0.0.1:${address.port}/vendor/strudel-web-1.3.0.js`),
+    ]);
+    assert.equal(home.status, 200);
+    assert.match(await home.text(), /脉冲音格/);
+    assert.equal(runtime.status, 200);
+    assert.match(runtime.headers.get("content-type") || "", /javascript/);
+    assert.ok((await runtime.arrayBuffer()).byteLength > 100_000);
+  } finally {
+    await close(staticServer);
+  }
 });
 
 test("完整 API 链可以把 MiniMax 响应转换成可播放代码", async () => {

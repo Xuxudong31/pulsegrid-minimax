@@ -1,6 +1,6 @@
 import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
-import { dirname, extname, resolve } from "node:path";
+import { dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
@@ -393,13 +393,13 @@ function serveStatic(req, res, url) {
   }
   const requested = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
   const file = resolve(ROOT, requested);
-  const rootPrefix = `${resolve(ROOT).toLowerCase()}\\`;
-  if (file.toLowerCase() !== resolve(ROOT).toLowerCase() && !file.toLowerCase().startsWith(rootPrefix)) {
-    res.writeHead(403);
+  const relativeFile = relative(ROOT, file);
+  if (relativeFile === ".." || relativeFile.startsWith(`..${sep}`) || isAbsolute(relativeFile)) {
+    res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
     res.end("禁止访问");
     return;
   }
-  if (!existsSync(file) || !statSync(file).isFile() || file.endsWith(".env")) {
+  if (!existsSync(file) || !statSync(file).isFile() || relativeFile === ".env") {
     res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
     res.end("页面不存在");
     return;
@@ -407,7 +407,7 @@ function serveStatic(req, res, url) {
   const headers = {
     "Content-Type": MIME_TYPES[extname(file).toLowerCase()] || "application/octet-stream",
     "X-Content-Type-Options": "nosniff",
-    "Cache-Control": file.includes(`${resolve(ROOT)}\\vendor\\`) ? "public, max-age=86400" : "no-cache",
+    "Cache-Control": relativeFile.startsWith(`vendor${sep}`) ? "public, max-age=86400" : "no-cache",
   };
   res.writeHead(200, headers);
   if (req.method === "HEAD") res.end();
