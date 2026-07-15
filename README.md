@@ -29,6 +29,8 @@ npm start
 
 项目包含 Node 后端，不能只使用 GitHub Pages，否则 MiniMax 编曲接口无法运行。仓库根目录已经提供 `render.yaml`，可直接通过 Render 发布完整网页版：
 
+[一键部署到 Render](https://render.com/deploy?repo=https://github.com/Xuxudong31/pulsegrid-minimax)
+
 1. 将项目推送到 GitHub，确认 `.env` 没有被提交。
 2. 在 Render 中选择 **New → Blueprint**，连接这个 GitHub 仓库。
 3. 首次创建时，在 `MINIMAX_API_KEY` 输入框填写 MiniMax 密钥。

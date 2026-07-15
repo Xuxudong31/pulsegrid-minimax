@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: pulsegrid-minimax
+    name: pulsegrid-xuxudong31
     runtime: node
     plan: free
     region: singapore
