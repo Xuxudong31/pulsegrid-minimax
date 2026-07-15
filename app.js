@@ -181,6 +181,25 @@ const INSTRUMENT_TRACK_META = Object.freeze({
 });
 const TRACK_COLOR_CLASSES = ["coral", "violet", "mint", "amber"];
 const BASE_TRACK_IDS = ["drums", "bass", "chords", "lead"];
+const TRACK_LABEL_TRANSLATIONS = Object.freeze({
+  kick: "底鼓",
+  bd: "底鼓",
+  snare: "军鼓",
+  sd: "军鼓",
+  clap: "拍手",
+  hat: "踩镲",
+  hats: "踩镲",
+  hh: "踩镲",
+  bass: "贝斯",
+  lead: "主旋律",
+  pad: "氛围铺底",
+  atmosphere: "氛围铺底",
+  fx: "效果",
+  effects: "效果",
+  riff: "连复段",
+  rockriffj: "摇滚连复段",
+});
+const MAX_CLIENT_INSTRUMENT_TRACKS = 24;
 const LEGACY_PROJECT_STORAGE_KEY = "pulsegrid.project.v2";
 const PROJECT_LIBRARY_STORAGE_KEY = "pulsegrid.projects.v1";
 const ACTIVE_PROJECT_STORAGE_KEY = "pulsegrid.projects.active.v1";
@@ -520,11 +539,37 @@ function splitTopLevelExpressions(body) {
   return expressions;
 }
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isSafeTrackId(value) {
+  const trackId = String(value || "").trim();
+  return trackId !== "master" && /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(trackId);
+}
+
+function localizeTrackLabel(label, trackId) {
+  const source = String(label || "").trim().slice(0, 32);
+  const sourceKey = source.toLowerCase().replace(/[\s_-]+/g, "");
+  const idKey = String(trackId || "").toLowerCase().replace(/[\s_-]+/g, "");
+  return TRACK_LABEL_TRANSLATIONS[sourceKey]
+    || TRACK_LABEL_TRANSLATIONS[idKey]
+    || source
+    || String(trackId || "自定义音轨").replace(/([a-z0-9])([A-Z])/g, "$1 $2");
+}
+
+function customTrackDetail(trackId) {
+  const key = String(trackId || "").toLowerCase();
+  if (/kick|snare|clap|hat|perc|drum|bd|sd|hh/.test(key)) return "鼓组 / 独立分轨";
+  if (/pad|atmo|ambient/.test(key)) return "氛围 / 独立分轨";
+  if (/fx|effect|noise|rise|impact/.test(key)) return "效果 / 独立分轨";
+  if (/bass|sub/.test(key)) return "低频 / 独立分轨";
+  return "自定义 / 独立分轨";
+}
+
 function normalizeDeletedTracks(value) {
   if (!Array.isArray(value)) return [];
-  return [...new Set(value.map((track) => String(track || "").trim()).filter((track) => (
-    BASE_TRACK_IDS.includes(track) || Object.hasOwn(INSTRUMENT_TRACK_META, track)
-  )))];
+  return [...new Set(value.map((track) => String(track || "").trim()).filter(isSafeTrackId))];
 }
 
 function findCallRange(code, name) {
@@ -563,16 +608,17 @@ function formatStackExpression(expression) {
 }
 
 function removeTrackFromCode(source, trackId) {
-  const safeTrack = BASE_TRACK_IDS.includes(trackId) || Object.hasOwn(INSTRUMENT_TRACK_META, trackId) ? trackId : "";
+  const safeTrack = isSafeTrackId(trackId) ? trackId : "";
   if (!safeTrack) return source;
-  const variable = `${safeTrack}Vol`;
+  const variable = getTrackVolumeVariable(safeTrack);
+  const safeVariable = escapeRegExp(variable);
   let code = String(source || "").replace(
-    new RegExp(`^\\s*(?:let|const)\\s+${variable}\\s*=\\s*slider\\([^\\n]*\\)\\s*;?\\s*\\r?\\n?`, "m"),
+    new RegExp(`^\\s*(?:let|const)\\s+${safeVariable}\\s*=\\s*slider\\([^\\n]*\\)\\s*;?\\s*\\r?\\n?`, "m"),
     "",
   );
   const range = findCallRange(code, "stack");
   if (!range) return code.replace(/\n{3,}/g, "\n\n").trim();
-  const gainPattern = new RegExp(`\\.gain\\(\\s*${variable}\\s*\\)`);
+  const gainPattern = new RegExp(`\\.gain\\(\\s*${safeVariable}\\s*\\)`);
   const expressions = splitTopLevelExpressions(range.body).filter((expression) => !gainPattern.test(expression));
   const body = expressions.length
     ? expressions.map(formatStackExpression).join(",\n")
@@ -667,19 +713,36 @@ function expressionStringArgument(expression, callName) {
   return match?.[1] ?? null;
 }
 
-function sliderValuesFromCode(code) {
-  const sliders = {};
-  for (const match of String(code || "").matchAll(/\b(?:let|const)\s+(\w+)\s*=\s*slider\(\s*(-?\d+(?:\.\d+)?)/g)) {
-    sliders[match[1]] = Number(match[2]);
+function sliderDefinitionsFromCode(code) {
+  const definitions = {};
+  const declaration = /\b(?:let|const)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*slider\s*\(([^)\r\n]*)\)/g;
+  for (const match of String(code || "").matchAll(declaration)) {
+    const args = splitTopLevelExpressions(match[2]);
+    const value = Number(args[0]);
+    if (!Number.isFinite(value)) continue;
+    const labelArgument = String(args[4] || "").trim();
+    const labelMatch = labelArgument.match(/^(["'`])([\s\S]*)\1$/);
+    definitions[match[1]] = {
+      variable: match[1],
+      value,
+      label: labelMatch ? labelMatch[2].replace(/\\([\\"'`])/g, "$1") : "",
+      index: match.index,
+    };
   }
-  return sliders;
+  return definitions;
+}
+
+function sliderValuesFromCode(code) {
+  return Object.fromEntries(
+    Object.values(sliderDefinitionsFromCode(code)).map((definition) => [definition.variable, definition.value]),
+  );
 }
 
 function compileCodeWithMixerValues(code) {
   const sliders = sliderValuesFromCode(code);
   return Object.entries(sliders).reduce((compiled, [variable, value]) => {
     if (!variable.endsWith("Vol") || !Number.isFinite(value)) return compiled;
-    const safeVariable = variable.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const safeVariable = escapeRegExp(variable);
     const volume = Math.max(0, Math.min(1, value));
     const literal = String(Math.round(volume * 10000) / 10000);
     return compiled.replace(
@@ -689,24 +752,33 @@ function compileCodeWithMixerValues(code) {
   }, String(code || ""));
 }
 
-function inferInstrumentTrackFromCode(trackId, volume, code, existingTrack = null) {
+function inferInstrumentTrackFromCode(trackId, definition, code, existingTrack = null) {
+  const variable = definition?.variable || `${trackId}Vol`;
+  const volume = Number(definition?.value);
+  const safeVariable = escapeRegExp(variable);
   const stackBody = extractCallBody(code, "stack") || "";
   const expression = splitTopLevelExpressions(stackBody)
-    .find((item) => new RegExp(`\\.gain\\(\\s*${trackId}Vol\\s*\\)`).test(item));
+    .find((item) => new RegExp(`\\.gain\\(\\s*${safeVariable}\\s*\\)`).test(item));
   const notePattern = expression ? expressionStringArgument(expression, "note") : "";
+  const samplePattern = expression ? expressionStringArgument(expression, "s") : "";
   const notes = notePattern?.match(/[a-gA-G](?:#|b|s)?-?\d+/g)?.slice(0, 8) || existingTrack?.notes || [];
   const struct = expression ? expressionStringArgument(expression, "struct") : null;
   const steps = struct === null
-    ? (expression ? [0] : existingTrack?.steps || [])
+    ? (samplePattern ? miniPatternToSteps(samplePattern) : expression ? [0] : existingTrack?.steps || [])
     : miniPatternToSteps(struct);
   const rhythm = Array.from({ length: 16 }, (_, index) => steps.includes(index) ? 1 : 0);
+  const knownMeta = INSTRUMENT_TRACK_META[String(trackId).toLowerCase()];
+  const label = localizeTrackLabel(definition?.label || existingTrack?.label || knownMeta?.label, trackId);
   return {
     id: trackId,
-    instrument: trackId,
+    variable,
+    instrument: existingTrack?.instrument || String(trackId).toLowerCase(),
+    label,
+    detail: existingTrack?.detail || knownMeta?.detail || customTrackDetail(trackId),
     notes,
     rhythm,
     steps,
-    volume: Math.max(0, Math.min(1, volume)),
+    volume: Math.max(0, Math.min(1, Number.isFinite(volume) ? volume : 0.55)),
     muted: volume === 0,
   };
 }
@@ -1222,10 +1294,14 @@ function normalizeClientInstrumentTracks(value) {
   if (!Array.isArray(value)) return [];
   const seen = new Set();
   return value.flatMap((item) => {
-    const id = String(item?.id || item?.instrument || "").trim().toLowerCase();
-    const meta = INSTRUMENT_TRACK_META[id];
-    if (!meta || seen.has(id)) return [];
+    const rawVariable = String(item?.variable || "").trim();
+    const variableId = /^[A-Za-z_][A-Za-z0-9_]*Vol$/.test(rawVariable) ? rawVariable.slice(0, -3) : "";
+    const id = variableId || String(item?.id || item?.instrument || "").trim();
+    if (!isSafeTrackId(id) || BASE_TRACK_IDS.includes(id) || seen.has(id)) return [];
     seen.add(id);
+    const variable = variableId ? rawVariable : `${id}Vol`;
+    const meta = INSTRUMENT_TRACK_META[String(item?.instrument || id).toLowerCase()]
+      || INSTRUMENT_TRACK_META[id.toLowerCase()];
     const rhythm = Array.isArray(item.rhythm) && item.rhythm.length === 16
       ? item.rhythm.map((step) => Number(step) > 0 ? 1 : 0)
       : Array.from({ length: 16 }, (_, index) => Array.isArray(item.steps) && item.steps.includes(index) ? 1 : 0);
@@ -1233,24 +1309,26 @@ function normalizeClientInstrumentTracks(value) {
     const volume = Number(item.volume);
     return [{
       id,
-      instrument: id,
-      label: meta.label,
+      variable,
+      instrument: String(item?.instrument || id).trim() || id,
+      label: localizeTrackLabel(item?.label || meta?.label, id),
+      detail: String(item?.detail || meta?.detail || customTrackDetail(id)).trim().slice(0, 48),
       notes: Array.isArray(item.notes) ? item.notes.filter((note) => typeof note === "string").slice(0, 8) : [],
       rhythm,
       steps,
       volume: Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 0.55,
       muted: Boolean(item.muted),
     }];
-  }).slice(0, 6);
+  }).slice(0, MAX_CLIENT_INSTRUMENT_TRACKS);
 }
 
 function syncMixerCardsFromSliderCode(code, { removeMissing = false, render = true } = {}) {
-  const sliders = sliderValuesFromCode(code);
+  const definitions = sliderDefinitionsFromCode(code);
   const declaredTracks = new Set();
   let changed = false;
 
   BASE_TRACK_IDS.forEach((track) => {
-    const value = sliders[`${track}Vol`];
+    const value = definitions[`${track}Vol`]?.value;
     if (Number.isFinite(value)) {
       declaredTracks.add(track);
       const nextVolume = Math.max(0, Math.min(1, value));
@@ -1263,26 +1341,38 @@ function syncMixerCardsFromSliderCode(code, { removeMissing = false, render = tr
     }
   });
 
-  Object.keys(INSTRUMENT_TRACK_META).forEach((trackId) => {
-    const value = sliders[`${trackId}Vol`];
+  Object.values(definitions).forEach((definition) => {
+    if (definition.variable === "masterVol" || !definition.variable.endsWith("Vol")) return;
+    const trackId = definition.variable.slice(0, -3);
+    if (!isSafeTrackId(trackId) || BASE_TRACK_IDS.includes(trackId)) return;
+    const value = definition.value;
     const existing = composition.instrumentTracks?.find((track) => track.id === trackId) || null;
     if (Number.isFinite(value)) {
       declaredTracks.add(trackId);
-      const inferred = inferInstrumentTrackFromCode(trackId, value, code, existing);
+      const inferred = inferInstrumentTrackFromCode(trackId, definition, code, existing);
       if (existing) {
         if (existing.volume !== inferred.volume || existing.muted !== inferred.muted
-          || existing.steps.join(",") !== inferred.steps.join(",")) changed = true;
+          || existing.variable !== inferred.variable || existing.label !== inferred.label
+          || existing.steps.join(",") !== inferred.steps.join(",")
+          || existing.notes.join(",") !== inferred.notes.join(",")) changed = true;
         Object.assign(existing, inferred);
       } else {
         composition.instrumentTracks = [...(composition.instrumentTracks || []), inferred];
         changed = true;
       }
-    } else if (removeMissing && existing) {
-      composition.instrumentTracks = composition.instrumentTracks.filter((track) => track.id !== trackId);
-      composition.deletedTracks = [...(composition.deletedTracks || []), trackId];
-      changed = true;
     }
   });
+
+  if (removeMissing) {
+    const removedTracks = (composition.instrumentTracks || [])
+      .filter((track) => !declaredTracks.has(track.id));
+    if (removedTracks.length) {
+      const removedIds = new Set(removedTracks.map((track) => track.id));
+      composition.instrumentTracks = composition.instrumentTracks.filter((track) => !removedIds.has(track.id));
+      composition.deletedTracks = [...(composition.deletedTracks || []), ...removedIds];
+      changed = true;
+    }
+  }
 
   const previousDeleted = normalizeDeletedTracks(composition.deletedTracks);
   composition.deletedTracks = previousDeleted.filter((track) => !declaredTracks.has(track));
@@ -1294,6 +1384,10 @@ function syncMixerCardsFromSliderCode(code, { removeMissing = false, render = tr
 
 function findInstrumentTrack(trackId) {
   return composition.instrumentTracks?.find((track) => track.id === trackId) || null;
+}
+
+function getTrackVolumeVariable(trackId) {
+  return findInstrumentTrack(trackId)?.variable || `${trackId}Vol`;
 }
 
 function getTrackMixState(trackId) {
@@ -1331,7 +1425,12 @@ function renderInstrumentTrackCards() {
   if (!grid) return;
   $$('.track-card[data-dynamic="true"]', grid).forEach((card) => card.remove());
   composition.instrumentTracks.forEach((track, index) => {
-    const meta = INSTRUMENT_TRACK_META[track.id];
+    const knownMeta = INSTRUMENT_TRACK_META[String(track.instrument || track.id).toLowerCase()]
+      || INSTRUMENT_TRACK_META[track.id.toLowerCase()];
+    const meta = {
+      label: track.label || knownMeta?.label || localizeTrackLabel("", track.id),
+      detail: track.detail || knownMeta?.detail || customTrackDetail(track.id),
+    };
     const color = TRACK_COLOR_CLASSES[(index + 1) % TRACK_COLOR_CLASSES.length];
     const card = document.createElement("article");
     card.className = "track-card";
@@ -2224,7 +2323,7 @@ function initEvents() {
     setTrackMixState(track, { volume: value, muted: false });
     $(`.mute-btn[data-track="${track}"]`)?.classList.remove("active");
     event.target.closest(".track-card").classList.remove("muted");
-    if (replaceSliderDefault(`${track}Vol`, value)) scheduleMixerRerun();
+    if (replaceSliderDefault(getTrackVolumeVariable(track), value)) scheduleMixerRerun();
   });
   $("#trackGrid").addEventListener("click", (event) => {
     const deleteButton = event.target.closest(".track-delete");
@@ -2240,7 +2339,7 @@ function initEvents() {
     button.classList.toggle("active", nextMuted);
     button.closest(".track-card").classList.toggle("muted", nextMuted);
     setTrackMixState(track, { muted: nextMuted });
-    if (replaceSliderDefault(`${track}Vol`, nextMuted ? 0 : state.volume)) scheduleMixerRerun();
+    if (replaceSliderDefault(getTrackVolumeVariable(track), nextMuted ? 0 : state.volume)) scheduleMixerRerun();
   });
 
   $("#codeEditor").addEventListener("input", () => {
