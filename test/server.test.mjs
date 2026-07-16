@@ -215,6 +215,15 @@ test("声音浏览器采用两级折叠布局并可独立试听", async () => {
   assert.match(styles, /\.transport\s*\{[^}]*grid-column:\s*1;/);
 });
 
+test("所有声音分轨归零时会立即关闭 Strudel 最终输出", async () => {
+  const source = await readFile(new URL("../app.js", import.meta.url), "utf8");
+  assert.match(source, /function mixerHasAudibleOutput\(code\)/);
+  assert.match(source, /controller\?\.output\?\.destinationGain\?\.gain/);
+  assert.match(source, /closeOutputIfMixerSilent\(code\)/);
+  assert.match(source, /linearRampToValueAtTime\(target, now \+ 0\.008\)/);
+  assert.match(source, /const shouldOpenOutput = mixerHasAudibleOutput\(code\)/);
+});
+
 test("完整 API 链可以把 MiniMax 响应转换成可播放代码", async () => {
   let receivedUrl = "";
   let receivedAuthorization = "";

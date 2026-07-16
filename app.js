@@ -834,6 +834,15 @@ function compileCodeWithMixerValues(code) {
   }, String(code || ""));
 }
 
+function mixerHasAudibleOutput(code) {
+  const sliders = sliderValuesFromCode(code);
+  if (Number.isFinite(sliders.masterVol) && sliders.masterVol <= 0) return false;
+  const trackVolumes = Object.entries(sliders)
+    .filter(([variable, value]) => variable !== "masterVol" && variable.endsWith("Vol") && Number.isFinite(value))
+    .map(([, value]) => value);
+  return !trackVolumes.length || trackVolumes.some((value) => value > 0);
+}
+
 function inferInstrumentTrackFromCode(trackId, definition, code, existingTrack = null) {
   const variable = definition?.variable || `${trackId}Vol`;
   const volume = Number(definition?.value);
@@ -1442,6 +1451,7 @@ class StrudelRuntime {
     this.analyserSource = null;
     this.soundfontCount = 0;
     this.soundLoadWarnings = [];
+    this.outputGateOpen = true;
   }
 
   setState(message, state = "") {
@@ -1530,6 +1540,8 @@ class StrudelRuntime {
 
   async run(code) {
     await this.ensure();
+    const shouldOpenOutput = mixerHasAudibleOutput(code);
+    if (!shouldOpenOutput) this.setOutputGate(false, true);
     this.lastEvalError = null;
     await this.repl.evaluate(compileCodeWithMixerValues(code), true);
     this.connectAnalyser();
@@ -1539,6 +1551,7 @@ class StrudelRuntime {
       updatePlayingUI(this.playing);
       throw evalError;
     }
+    this.setOutputGate(shouldOpenOutput);
     this.playing = true;
     this.startedAt = performance.now();
     updatePlayingUI(true);
@@ -1575,7 +1588,32 @@ class StrudelRuntime {
     }
   }
 
+  setOutputGate(open, immediate = false) {
+    try {
+      const context = this.api?.getAudioContext?.();
+      const controller = this.api?.getSuperdoughAudioController?.();
+      const outputGain = controller?.output?.destinationGain?.gain;
+      if (!context || !outputGain) return false;
+      const target = open ? 1 : 0;
+      const now = context.currentTime;
+      outputGain.cancelScheduledValues(now);
+      outputGain.setValueAtTime(outputGain.value, now);
+      if (immediate) outputGain.linearRampToValueAtTime(target, now + 0.008);
+      else outputGain.setTargetAtTime(target, now, 0.012);
+      this.outputGateOpen = open;
+      return true;
+    } catch (error) {
+      console.warn("无法同步 Strudel 最终输出音量", error);
+      return false;
+    }
+  }
+
+  closeOutputIfMixerSilent(code) {
+    if (!mixerHasAudibleOutput(code)) this.setOutputGate(false, true);
+  }
+
   stop(reset = true) {
+    this.setOutputGate(false, true);
     if (this.repl) this.repl.stop();
     else if (this.api) this.api.hush?.();
     this.playing = false;
@@ -2652,6 +2690,7 @@ async function previewSoundFromBrowser(button) {
   const variantIndex = (Number(button.dataset.previewIndex) || 0) % variants;
   button.classList.add("is-loading");
   $("#soundPreviewStatus").textContent = `正在加载 ${name}…`;
+  let restoreClosedGate = false;
 
   try {
     const api = await strudelRuntime.ensure();
@@ -2671,7 +2710,9 @@ async function previewSoundFromBrowser(button) {
     };
     if (type === "synth" || type === "soundfont" || type === "wavetable") value.note = "c4";
     await preloadSoundPreview(api, sound, value, variantIndex);
+    restoreClosedGate = !strudelRuntime.outputGateOpen;
     await api.superdough(value, context.currentTime + 0.08, duration, composition.bpm / 60 / 4);
+    strudelRuntime.setOutputGate(true, true);
     trackAnalyticsEvent("sound_preview", name);
 
     $$(".sound-chip.is-playing").forEach((item) => item.classList.remove("is-playing"));
@@ -2683,8 +2724,12 @@ async function previewSoundFromBrowser(button) {
     soundPreviewClearTimer = window.setTimeout(() => {
       button.classList.remove("is-playing");
       $("#soundPreviewStatus").textContent = "点击音色即可试听";
+      if (restoreClosedGate && (!strudelRuntime.playing || !mixerHasAudibleOutput($("#codeEditor").value))) {
+        strudelRuntime.setOutputGate(false, true);
+      }
     }, Math.max(900, duration * 1000 + 260));
   } catch (error) {
+    if (restoreClosedGate) strudelRuntime.setOutputGate(false, true);
     console.warn(`无法试听声音 ${name}`, error);
     $("#soundPreviewStatus").textContent = `${name} 试听失败`;
     showToast(`无法试听 ${name}，请检查网络后重试`);
@@ -2820,7 +2865,10 @@ function initEvents() {
     const value = Number(event.target.value);
     updateRangeFill(event.target);
     $("#masterValue").textContent = `${Math.round(value * 100)}%`;
-    if (replaceSliderDefault("masterVol", value)) scheduleMixerRerun();
+    if (replaceSliderDefault("masterVol", value)) {
+      strudelRuntime.closeOutputIfMixerSilent($("#codeEditor").value);
+      scheduleMixerRerun();
+    }
   });
 
   $("#trackGrid").addEventListener("input", (event) => {
@@ -2832,7 +2880,10 @@ function initEvents() {
     setTrackMixState(track, { volume: value, muted: false });
     $(`.mute-btn[data-track="${track}"]`)?.classList.remove("active");
     event.target.closest(".track-card").classList.remove("muted");
-    if (replaceSliderDefault(getTrackVolumeVariable(track), value)) scheduleMixerRerun();
+    if (replaceSliderDefault(getTrackVolumeVariable(track), value)) {
+      strudelRuntime.closeOutputIfMixerSilent($("#codeEditor").value);
+      scheduleMixerRerun();
+    }
   });
   $("#trackGrid").addEventListener("click", (event) => {
     const deleteButton = event.target.closest(".track-delete");
@@ -2848,7 +2899,10 @@ function initEvents() {
     button.classList.toggle("active", nextMuted);
     button.closest(".track-card").classList.toggle("muted", nextMuted);
     setTrackMixState(track, { muted: nextMuted });
-    if (replaceSliderDefault(getTrackVolumeVariable(track), nextMuted ? 0 : state.volume)) scheduleMixerRerun();
+    if (replaceSliderDefault(getTrackVolumeVariable(track), nextMuted ? 0 : state.volume)) {
+      strudelRuntime.closeOutputIfMixerSilent($("#codeEditor").value);
+      scheduleMixerRerun();
+    }
   });
 
   $("#codeEditor").addEventListener("input", () => {
