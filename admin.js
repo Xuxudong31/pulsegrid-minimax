@@ -8,6 +8,17 @@ const EVENT_LABELS = {
   code_run: "运行了 Strudel 代码",
   project_save: "保存了项目",
 };
+const CODE_SOURCE_LABELS = {
+  manual: "手动编程",
+  paste: "外部粘贴",
+  ai: "AI 创作",
+  save: "项目保存",
+  run: "代码运行",
+  import: "文件导入",
+  clear: "清空代码",
+  mixer: "混音修改",
+  pre_ai: "AI 修改前版本",
+};
 
 function formatNumber(value) {
   return new Intl.NumberFormat("zh-CN").format(Number(value || 0));
@@ -118,6 +129,30 @@ function renderActivity(items) {
   });
 }
 
+function renderAgentActivity(items) {
+  const container = $("#agentActivityList");
+  container.replaceChildren();
+  if (!items?.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "Agent 完成编曲后会显示在这里";
+    container.append(empty);
+    return;
+  }
+  items.slice(0, 8).forEach((item) => {
+    const article = document.createElement("article");
+    article.className = "activity-item";
+    const title = document.createElement("strong");
+    const value = document.createElement("span");
+    const time = document.createElement("time");
+    title.textContent = `${item.success ? "编曲成功" : "编曲失败"} · ${item.intent || "智能修改"}${item.feedback > 0 ? " · 喜欢" : item.feedback < 0 ? " · 需改进" : ""}`;
+    value.textContent = item.prompt || item.model || "MiniMax Agent";
+    time.textContent = formatTime(item.at);
+    article.append(title, value, time);
+    container.append(article);
+  });
+}
+
 function drawTrendChart(items) {
   const canvas = $("#trendChart");
   const rect = canvas.getBoundingClientRect();
@@ -203,6 +238,11 @@ function renderStats(data) {
   $("#eventAi").textContent = formatNumber(events.ai_compose);
   $("#eventSound").textContent = formatNumber(events.sound_preview);
   $("#eventCode").textContent = formatNumber(events.code_run);
+  const agent = data.agent || { totals: {}, codeSources: [], recentInteractions: [] };
+  $("#agentCodeVersions").textContent = formatNumber(agent.totals?.codeVersions);
+  $("#agentInteractions").textContent = formatNumber(agent.totals?.interactions);
+  $("#agentPositiveFeedback").textContent = formatNumber(agent.totals?.positiveFeedback);
+  $("#agentLessons").textContent = formatNumber(agent.totals?.learnedLessons);
   $("#lastUpdated").textContent = `更新于 ${formatTime(data.generatedAt)} · 每分钟自动刷新`;
   const persistent = data.storage === "postgres";
   $("#storageBadge").textContent = persistent ? "PostgreSQL 持久存储" : "临时内存存储";
@@ -212,6 +252,11 @@ function renderStats(data) {
   renderRankList($("#deviceList"), data.devices);
   renderRankList($("#browserList"), data.browsers);
   renderActivity(data.recentEvents);
+  renderRankList($("#agentSourceList"), (agent.codeSources || []).map((item) => ({
+    label: CODE_SOURCE_LABELS[item.source] || item.source,
+    count: item.count,
+  })));
+  renderAgentActivity(agent.recentInteractions);
   requestAnimationFrame(() => drawTrendChart(data.daily || []));
 }
 

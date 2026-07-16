@@ -101,6 +101,29 @@
             </article>
           </section>
 
+          <section class="metric-grid" aria-label="Agent 学习数据">
+            <article class="metric-card coral">
+              <span class="metric-label">代码版本</span>
+              <strong id="agentCodeVersions">0</strong>
+              <small>手写、粘贴、运行与 AI 创作</small>
+            </article>
+            <article class="metric-card violet">
+              <span class="metric-label">Agent 对话</span>
+              <strong id="agentInteractions">0</strong>
+              <small>已进入长期协作记忆</small>
+            </article>
+            <article class="metric-card mint">
+              <span class="metric-label">正向反馈</span>
+              <strong id="agentPositiveFeedback">0</strong>
+              <small>用户明确表示有帮助</small>
+            </article>
+            <article class="metric-card amber">
+              <span class="metric-label">学习经验</span>
+              <strong id="agentLessons">0</strong>
+              <small>已提炼的个人偏好规则</small>
+            </article>
+          </section>
+
           <section class="content-grid">
             <article class="panel trend-panel">
               <header class="panel-header">
@@ -138,6 +161,14 @@
             <article class="panel activity-panel">
               <header class="panel-header"><div><span class="eyebrow">最近动态</span><h2>音乐操作记录</h2></div></header>
               <div class="activity-list" id="activityList"></div>
+            </article>
+            <article class="panel list-panel">
+              <header class="panel-header"><div><span class="eyebrow">Agent 记忆来源</span><h2>代码如何产生</h2></div></header>
+              <div class="rank-list" id="agentSourceList"></div>
+            </article>
+            <article class="panel activity-panel">
+              <header class="panel-header"><div><span class="eyebrow">Agent 学习轨迹</span><h2>最近智能编曲</h2></div></header>
+              <div class="activity-list" id="agentActivityList"></div>
             </article>
           </section>
         </div>

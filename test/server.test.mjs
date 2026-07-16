@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import test from "node:test";
+import { createAgentMemoryService } from "../agent-memory.mjs";
 import { createAnalyticsService } from "../analytics.mjs";
-import { buildStrudelCode, normalizePlan, parseModelJson, server as staticServer } from "../server.mjs";
+import { buildStrudelCode, detectAgentIntent, normalizePlan, parseModelJson, server as staticServer } from "../server.mjs";
 
 function listen(server) {
   return new Promise((resolve, reject) => {
@@ -65,6 +66,62 @@ test("明确要求口琴时会保留主旋律并新增独立口琴音轨", () =>
   assert.match(code, /\.s\("square"\)/);
   assert.match(code, /\.vib\(5\.5\)\.vibmod\(0\.12\)/);
   assert.equal((code.match(/slider\(/g) || []).length, 7);
+});
+
+test("Agent 会识别新增、删除、混音和局部修改意图", () => {
+  assert.equal(detectAgentIntent("加入一个口琴", "stack(s(\"bd\"))"), "add_track");
+  assert.equal(detectAgentIntent("删除口琴", "stack(s(\"bd\"))"), "remove_track");
+  assert.equal(detectAgentIntent("把贝斯音量调低", "stack(s(\"bd\"))"), "mix");
+  assert.equal(detectAgentIntent("只让音色更暗，其他保持不变", "stack(s(\"bd\"))"), "targeted_edit");
+  assert.equal(detectAgentIntent("制作一段 132 BPM 铁克诺并加入口琴", "stack(s(\"bd\"))"), "transform");
+});
+
+test("Agent 记忆会保存代码来源并把用户反馈提炼成长期经验", async () => {
+  const memory = createAgentMemoryService({ databaseUrl: "" });
+  const visitorId = "visitor_agent_memory_123";
+  const projectId = "project-agent-test";
+  const interactionId = await memory.recordInteraction({
+    visitorId,
+    sessionId: "session-agent-test",
+    projectId,
+    prompt: "加入轻柔的口琴",
+    reply: "已加入独立口琴轨道。",
+    intent: "add_track",
+    model: "MiniMax-M3",
+    plan: { style: "house", bpm: 122, key: "F minor", instrumentTracks: [{ instrument: "harmonica", label: "口琴" }] },
+    codeHash: "a".repeat(64),
+  });
+  await memory.recordCode({
+    visitorId,
+    sessionId: "session-agent-test",
+    projectId,
+    source: "paste",
+    code: '// DJ OPUS\nstack(note("c5").s("square"))',
+  });
+  const feedback = await memory.recordFeedback({ visitorId, interactionId, rating: 1 });
+  const context = await memory.getContext({ visitorId, projectId });
+  const stats = await memory.getAdminStats();
+  assert.equal(feedback.recorded, true);
+  assert.equal(context.recentCodes[0].source, "paste");
+  assert.match(context.userLessons[0], /喜欢.*house.*口琴/);
+  assert.equal(stats.totals.codeVersions, 1);
+  assert.equal(stats.totals.positiveFeedback, 1);
+  assert.equal(stats.totals.learnedLessons, 1);
+});
+
+test("前端会记录手写、粘贴、运行、保存和 AI 反馈，同时允许关闭学习记忆", async () => {
+  const [source, html, admin] = await Promise.all([
+    readFile(new URL("../app.js", import.meta.url), "utf8"),
+    readFile(new URL("../index.html", import.meta.url), "utf8"),
+    readFile(new URL("../admin.html", import.meta.url), "utf8"),
+  ]);
+  assert.match(html, /id="agentMemoryToggle"/);
+  assert.match(source, /scheduleAgentCodeSnapshot\(event\.inputType === "insertFromPaste" \? "paste" : "manual"/);
+  assert.match(source, /recordAgentCodeVersion\("run"/);
+  assert.match(source, /recordAgentCodeVersion\("save"/);
+  assert.match(source, /\/api\/agent\/feedback/);
+  assert.match(admin, /id="agentCodeVersions"/);
+  assert.match(admin, /id="agentLessons"/);
 });
 
 test("删除基础分轨会同时删除音量变量和演奏层", () => {
@@ -302,6 +359,46 @@ test("完整 API 链可以把 MiniMax 响应转换成可播放代码", async () 
     assert.match(body.code, /AI 修改：在现有作品里加入一段口琴主旋律/);
     assert.match(body.code, /let harmonicaVol = slider/);
     assert.match(body.code, /独立乐器轨道：口琴/);
+
+    const surgicalResponse = await fetch(`http://127.0.0.1:${appAddress.port}/api/compose`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: "只加入一条口琴，其他保持不变",
+        currentCode: '// DJ OPUS\nsetcps(96 / 60 / 4)\nnote("[a3,c4,e4]").s("triangle").gain(chordsVol)',
+        composition: {
+          id: "house",
+          bpm: 96,
+          key: "A minor",
+          bank: "RolandTR808",
+          tone: 880,
+          bassSynth: "sine",
+          chordSynth: "triangle",
+          leadSynth: "square",
+          kick: [0, 8],
+          snare: [4, 12],
+          hats: [2, 6, 10, 14],
+          bass: [0, 7, 11],
+          lead: [3, 9, 15],
+          bassNotes: [0, 3, 7],
+          leadNotes: [12, 15, 19],
+          volumes: { drums: 0.44, bass: 0.51, chords: 0.37, lead: 0.29 },
+        },
+        instrumentTracks: [],
+        deletedTracks: [],
+        visitorId: "visitor-surgical-test",
+        sessionId: "session-surgical-test",
+        projectId: "project-surgical-test",
+        memoryEnabled: true,
+      }),
+    });
+    const surgical = await surgicalResponse.json();
+    assert.equal(surgicalResponse.status, 200);
+    assert.equal(surgical.leadInstrument, "harmonica");
+    assert.match(surgical.code, /setcps\(96 \/ 60 \/ 4\)/);
+    assert.match(surgical.code, /bank\("RolandTR808"\)/);
+    assert.match(surgical.code, /let drumsVol = slider\(0\.44/);
+    assert.match(surgical.code, /let bassVol = slider\(0\.51/);
 
     const followUpResponse = await fetch(`http://127.0.0.1:${appAddress.port}/api/compose`, {
       method: "POST",

@@ -204,6 +204,8 @@ const LEGACY_PROJECT_STORAGE_KEY = "pulsegrid.project.v2";
 const PROJECT_LIBRARY_STORAGE_KEY = "pulsegrid.projects.v1";
 const ACTIVE_PROJECT_STORAGE_KEY = "pulsegrid.projects.active.v1";
 const ANALYTICS_VISITOR_STORAGE_KEY = "pulsegrid.analytics.visitor.v1";
+const AGENT_SESSION_STORAGE_KEY = "pulsegrid.agent.session.v1";
+const AGENT_MEMORY_STORAGE_KEY = "pulsegrid.agent.memory.enabled.v1";
 const MAX_SAVED_PROJECTS = 50;
 const STRUDEL_SAMPLE_MAPS = [
   {
@@ -260,6 +262,10 @@ let soundSearchTimer;
 let soundPreviewClearTimer;
 let analyticsVisitorId = "";
 let analyticsHeartbeatTimer;
+let agentSessionId = "";
+let agentCodeSnapshotTimer;
+let pendingAgentCodeSource = "manual";
+const agentRecordedHashes = new Map();
 
 function getAnalyticsVisitorId() {
   if (analyticsVisitorId) return analyticsVisitorId;
@@ -304,6 +310,101 @@ function initAnalyticsTracking() {
     if (document.visibilityState === "visible") heartbeat();
   });
   window.addEventListener("pagehide", () => window.clearInterval(analyticsHeartbeatTimer), { once: true });
+}
+
+function getAgentSessionId() {
+  if (agentSessionId) return agentSessionId;
+  try {
+    const existing = sessionStorage.getItem(AGENT_SESSION_STORAGE_KEY);
+    if (/^[a-zA-Z0-9_-]{1,100}$/.test(existing || "")) {
+      agentSessionId = existing;
+      return agentSessionId;
+    }
+  } catch (_) {}
+  agentSessionId = typeof globalThis.crypto?.randomUUID === "function"
+    ? globalThis.crypto.randomUUID()
+    : `session_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
+  try { sessionStorage.setItem(AGENT_SESSION_STORAGE_KEY, agentSessionId); } catch (_) {}
+  return agentSessionId;
+}
+
+function isAgentMemoryEnabled() {
+  try {
+    const stored = localStorage.getItem(AGENT_MEMORY_STORAGE_KEY);
+    return stored === null ? true : stored !== "false";
+  } catch (_) {
+    return true;
+  }
+}
+
+function updateAgentMemoryUI() {
+  const enabled = isAgentMemoryEnabled();
+  const toggle = $("#agentMemoryToggle");
+  const state = $("#agentMemoryState");
+  if (toggle) toggle.checked = enabled;
+  if (state) state.textContent = enabled
+    ? "Agent 学习记忆已开启 · 记录关键版本"
+    : "Agent 学习记忆已关闭 · 仅本次处理";
+}
+
+function sendAgentMemory(path, payload = {}) {
+  if (!isAgentMemoryEnabled()) return Promise.resolve({ recorded: false });
+  return fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      visitorId: getAnalyticsVisitorId(),
+      sessionId: getAgentSessionId(),
+      projectId: currentProjectId || "project-unknown",
+      ...payload,
+    }),
+    keepalive: true,
+  }).then((response) => response.json().catch(() => ({}))).catch(() => ({ recorded: false }));
+}
+
+function recordAgentCodeVersion(source, { prompt = "", success = true, error = "", metadata = {}, force = false } = {}) {
+  if (!isAgentMemoryEnabled()) return;
+  const code = $("#codeEditor")?.value || "";
+  const hash = String(hashString(code));
+  if (!force && ["manual", "mixer"].includes(source) && agentRecordedHashes.get(source) === hash) return;
+  agentRecordedHashes.set(source, hash);
+  sendAgentMemory("/api/agent/code", {
+    source,
+    code,
+    projectName: composition.projectName,
+    prompt,
+    success,
+    error,
+    metadata: { bpm: composition.bpm, key: composition.key, style: composition.id, ...metadata },
+  });
+}
+
+function scheduleAgentCodeSnapshot(source = "manual", delay = 4_000) {
+  if (!isAgentMemoryEnabled()) return;
+  pendingAgentCodeSource = source === "paste" ? "paste" : pendingAgentCodeSource === "paste" ? "paste" : source;
+  window.clearTimeout(agentCodeSnapshotTimer);
+  agentCodeSnapshotTimer = window.setTimeout(() => {
+    agentCodeSnapshotTimer = null;
+    recordAgentCodeVersion(pendingAgentCodeSource);
+    pendingAgentCodeSource = "manual";
+  }, delay);
+}
+
+function flushAgentCodeSnapshot() {
+  if (!agentCodeSnapshotTimer) return;
+  window.clearTimeout(agentCodeSnapshotTimer);
+  agentCodeSnapshotTimer = null;
+  recordAgentCodeVersion(pendingAgentCodeSource);
+  pendingAgentCodeSource = "manual";
+}
+
+function recordAgentOutcome(interactionId, success, error = "") {
+  if (!interactionId) return;
+  sendAgentMemory("/api/agent/outcome", { interactionId, success, error });
+}
+
+function recordAgentFeedback(interactionId, rating) {
+  return sendAgentMemory("/api/agent/feedback", { interactionId, rating });
 }
 
 function hashString(value) {
@@ -2443,6 +2544,11 @@ async function requestMiniMaxComposition(prompt) {
         currentCode: $("#codeEditor").value,
         instrumentTracks: composition.instrumentTracks,
         deletedTracks: composition.deletedTracks,
+        composition,
+        visitorId: getAnalyticsVisitorId(),
+        sessionId: getAgentSessionId(),
+        projectId: currentProjectId || "project-unknown",
+        memoryEnabled: isAgentMemoryEnabled(),
       }),
       signal: controller.signal,
     });
@@ -2499,7 +2605,7 @@ async function refreshMiniMaxStatus() {
     if (!response.ok) throw new Error();
     const data = await response.json();
     state.textContent = data.configured
-      ? `${data.provider} ${data.model} 已连接`
+      ? `${data.provider} ${data.model} Agent 已连接${data.agent?.memory ? " · 长期记忆" : ""}`
       : "MiniMax 待配置 · 请设置 API 密钥";
   } catch (_) {
     state.textContent = "MiniMax 后端未连接 · 请用 F5 启动";
@@ -2515,20 +2621,26 @@ async function generateFromPrompt(rawPrompt) {
   const typing = addMessage("agent", '<div class="typing-dots"><i></i><i></i><i></i></div>');
   $("#promptStarters").style.display = "none";
   let phase = "minimax";
+  let interactionId = "";
 
   try {
     $("#agentState").textContent = "MiniMax 正在编曲…";
     setEditorStatus("正在请求 MiniMax 智能编曲…", "pending");
     const result = await requestMiniMaxComposition(prompt);
+    interactionId = result.interactionId || "";
     applyMiniMaxComposition(result, prompt);
     trackAnalyticsEvent("ai_compose", composition.label);
     typing.remove();
     phase = "strudel";
     setEditorStatus("正在启动官方 Strudel 音频引擎…", "pending");
     await strudelRuntime.run($("#codeEditor").value);
+    recordAgentOutcome(interactionId, true);
     trackAnalyticsEvent("play", "AI 自动播放");
 
-    const extra = `<div class="composition-summary"><span>每分钟 ${composition.bpm} 拍</span><span>${escapeHTML(localizeKey(composition.key))}</span><span>${escapeHTML(composition.label)}</span></div>`;
+    const feedback = interactionId
+      ? `<div class="agent-feedback" data-interaction-id="${escapeHTML(interactionId)}"><span>这次编曲对你有帮助吗？</span><button type="button" data-agent-rating="1">有帮助</button><button type="button" data-agent-rating="-1">需改进</button></div>`
+      : "";
+    const extra = `<div class="composition-summary"><span>每分钟 ${composition.bpm} 拍</span><span>${escapeHTML(localizeKey(composition.key))}</span><span>${escapeHTML(composition.label)}</span></div>${feedback}`;
     addMessage("agent", `<p>${escapeHTML(result.reply || "MiniMax 已完成编曲，真实 Strudel 轨道已经开始运行。")}</p><p class="muted-copy">主作品代码已自动覆盖并保存；由 ${escapeHTML(result.provider)} ${escapeHTML(result.model)} 编曲，官方 Strudel 网页音频引擎演奏。</p>`, extra);
     setEditorStatus("MiniMax 智能编曲 · 官方 Strudel 正在演奏");
     try {
@@ -2549,6 +2661,7 @@ async function generateFromPrompt(rawPrompt) {
       showToast(message);
     } else {
       const details = strudelErrorDetails(error);
+      recordAgentOutcome(interactionId, false, details.message);
       setEditorStatus(details.message, "error");
       addMessage("agent", `<p>MiniMax 已完成编曲，但没有成功启动真实 Strudel：${escapeHTML(details.message)}</p><p class="muted-copy">请确认网络可以访问采样服务器，然后刷新页面重试。</p>`);
       showToast(details.message);
@@ -2589,11 +2702,13 @@ async function parseEditorAndRun({ quiet = false } = {}) {
   setEditorStatus("正在由官方 Strudel 运行代码…", "pending");
   try {
     await strudelRuntime.run(code);
+    recordAgentCodeVersion("run", { success: true, force: true });
     setEditorStatus("官方 Strudel · 音乐模式正在演奏");
     if (!quiet) showToast("Strudel 音乐模式已运行");
     return true;
   } catch (error) {
     const details = strudelErrorDetails(error);
+    recordAgentCodeVersion("run", { success: false, error: details.message, force: true });
     setEditorStatus(`第 ${details.line} 行 · ${details.message}`, "error");
     if (!quiet) {
       focusEditorLine(details.line);
@@ -2611,6 +2726,7 @@ function replaceSliderDefault(variable, value) {
   updateLineNumbers();
   setEditorDirty(true);
   setEditorStatus("混音已更改 · 正在同步 Strudel", "pending");
+  scheduleAgentCodeSnapshot("mixer", 1_200);
   return true;
 }
 
@@ -2928,6 +3044,16 @@ function setupVisualizer() {
 }
 
 function initEvents() {
+  $("#agentMemoryToggle").addEventListener("change", (event) => {
+    const enabled = Boolean(event.target.checked);
+    try { localStorage.setItem(AGENT_MEMORY_STORAGE_KEY, String(enabled)); } catch (_) {}
+    if (!enabled) {
+      window.clearTimeout(agentCodeSnapshotTimer);
+      agentCodeSnapshotTimer = null;
+    }
+    updateAgentMemoryUI();
+    showToast(enabled ? "Agent 学习记忆已开启" : "Agent 学习记忆已关闭");
+  });
   $("#projectSwitcherBtn").addEventListener("click", () => {
     setProjectPickerOpen($("#projectPopover").hidden);
   });
@@ -2967,6 +3093,24 @@ function initEvents() {
     }
   });
   $$("[data-prompt]").forEach((button) => button.addEventListener("click", () => generateFromPrompt(button.dataset.prompt)));
+  $("#chatMessages").addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-agent-rating]");
+    if (!button) return;
+    const panel = button.closest(".agent-feedback");
+    const interactionId = panel?.dataset.interactionId;
+    if (!interactionId) return;
+    const rating = Number(button.dataset.agentRating);
+    panel.querySelectorAll("button").forEach((item) => { item.disabled = true; });
+    const result = await recordAgentFeedback(interactionId, rating);
+    if (result?.recorded) {
+      button.classList.add("selected");
+      panel.classList.add("saved");
+      panel.querySelector("span").textContent = rating > 0 ? "已记住你喜欢这次方向" : "已记住，下次会换一种处理";
+    } else {
+      panel.querySelectorAll("button").forEach((item) => { item.disabled = false; });
+      showToast(isAgentMemoryEnabled() ? "反馈暂时没有保存成功" : "请先开启 Agent 学习记忆");
+    }
+  });
 
   $("#playBtn").addEventListener("click", async () => {
     if (strudelRuntime.playing) strudelRuntime.stop();
@@ -3024,11 +3168,15 @@ function initEvents() {
     }
   });
 
-  $("#codeEditor").addEventListener("input", () => {
+  $("#codeEditor").addEventListener("input", (event) => {
     updateLineNumbers();
     setEditorDirty(true);
     setEditorStatus("已修改 · 按 Ctrl+回车运行", "pending");
     scheduleSliderCardSync();
+    scheduleAgentCodeSnapshot(event.inputType === "insertFromPaste" ? "paste" : "manual", event.inputType === "insertFromPaste" ? 150 : 4_000);
+  });
+  $("#codeEditor").addEventListener("paste", () => {
+    window.setTimeout(() => scheduleAgentCodeSnapshot("paste", 120), 0);
   });
   $("#codeEditor").addEventListener("scroll", (event) => { $("#lineNumbers").scrollTop = event.target.scrollTop; });
   $("#codeEditor").addEventListener("keydown", (event) => {
@@ -3054,6 +3202,7 @@ function initEvents() {
     setEditorDirty(true);
     setEditorStatus("已修改 · 按 Ctrl+回车运行", "pending");
     scheduleSliderCardSync();
+    scheduleAgentCodeSnapshot("manual", 4_000);
   });
 
   $$(".scope-switch button").forEach((button) => button.addEventListener("click", () => {
@@ -3099,12 +3248,14 @@ function initEvents() {
     updateLineNumbers();
     setEditorDirty(true);
     setEditorStatus("代码已清空 · 保存后会更新项目", "pending");
+    recordAgentCodeVersion("clear", { force: true });
     editor.focus();
     showToast("主作品代码已清空");
   });
   $("#saveBtn").addEventListener("click", () => {
     try {
       saveCurrentProject();
+      recordAgentCodeVersion("save", { force: true });
       trackAnalyticsEvent("project_save", composition.projectName);
     } catch (error) {
       console.warn("无法保存本地项目", error);
@@ -3122,15 +3273,23 @@ function initEvents() {
   });
   $("#newSessionBtn").addEventListener("click", () => startNewProject());
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden") flushProjectAutoSave();
+    if (document.visibilityState === "hidden") {
+      flushProjectAutoSave();
+      flushAgentCodeSnapshot();
+    }
   });
-  window.addEventListener("beforeunload", flushProjectAutoSave);
+  window.addEventListener("beforeunload", () => {
+    flushProjectAutoSave();
+    flushAgentCodeSnapshot();
+  });
 }
 
 function init() {
   const restored = restoreSavedProject();
   if (!restored) startNewProject({ skipDirtyCheck: true, announce: false });
   initAnalyticsTracking();
+  getAgentSessionId();
+  updateAgentMemoryUI();
   $$('input[type="range"]').forEach(updateRangeFill);
   initEvents();
   refreshMiniMaxStatus();

@@ -146,6 +146,16 @@ kbd { font: inherit; border: 1px solid #383941; border-radius: 3px; padding: 1px
 .composer-footer svg { width: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linejoin: round; }
 .local-note { display: flex; justify-content: center; align-items: center; gap: 5px; margin-top: 8px; color: #4f5058; font-size: 8px; }
 .local-note svg { width: 11px; }
+.agent-memory-control { display: flex; align-items: center; justify-content: center; gap: 6px; margin-top: 6px; color: #555761; font-size: 8px; cursor: pointer; user-select: none; }
+.agent-memory-control input { position: absolute; opacity: 0; pointer-events: none; }
+.memory-switch { position: relative; width: 22px; height: 12px; border: 1px solid #30313a; border-radius: 999px; background: #14151b; transition: .2s; }
+.memory-switch i { position: absolute; top: 2px; left: 2px; width: 6px; height: 6px; border-radius: 50%; background: #686a74; transition: .2s; }
+.agent-memory-control input:checked + .memory-switch { border-color: rgba(76, 232, 174, .48); background: rgba(76, 232, 174, .1); }
+.agent-memory-control input:checked + .memory-switch i { left: 12px; background: #4ce8ae; box-shadow: 0 0 7px rgba(76, 232, 174, .55); }
+.agent-feedback { display: flex; align-items: center; gap: 5px; margin-top: 9px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,.06); color: #666873; font-size: 8px; }
+.agent-feedback button { border: 1px solid #30313a; border-radius: 5px; background: #15161c; color: #858793; padding: 3px 7px; cursor: pointer; }
+.agent-feedback button:hover, .agent-feedback button.selected { border-color: rgba(255,121,93,.55); color: #f0f0f2; }
+.agent-feedback.saved { color: #4ce8ae; }
 .engine-ready { color: #6f9f8b; }
 .engine-live { color: var(--mint); text-shadow: 0 0 10px rgba(101,232,180,.28); }
 .engine-loading { color: var(--amber); }
