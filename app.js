@@ -865,6 +865,10 @@ function inferInstrumentTrackFromCode(trackId, definition, code, existingTrack =
   };
 }
 
+function patternHasPlayableEvent(pattern) {
+  return /[A-Za-z_][A-Za-z0-9_:-]*/.test(String(pattern || ""));
+}
+
 function parsePatternCode(code, currentComposition = composition) {
   const validation = validatePatternCode(code);
   if (validation.errors.length) return { errors: validation.errors, composition: null };
@@ -878,7 +882,9 @@ function parsePatternCode(code, currentComposition = composition) {
   const noteExpressions = expressions
     .map((expression) => ({ expression, pattern: expressionStringArgument(expression, "note") }))
     .filter((item) => item.pattern !== null && /^note\s*\(/.test(item.expression));
-  if (!sampleExpressions.length && !noteExpressions.length) {
+  const hasPlayableExpression = [...sampleExpressions, ...noteExpressions]
+    .some(({ pattern }) => patternHasPlayableEvent(pattern));
+  if (!hasPlayableExpression) {
     return { errors: [{ line: 1, message: "stack() 中没有可播放的 s() 或 note()" }], composition: null };
   }
 
@@ -2389,8 +2395,12 @@ async function generateFromPrompt(rawPrompt) {
     if (typing.isConnected) typing.remove();
     if (phase === "minimax") {
       const message = error.message || "MiniMax 智能编曲失败";
+      const isKeyProblem = /(密钥|API\s*key|权限|401|403)/i.test(message);
+      const help = isKeyProblem
+        ? "请检查 Render 环境变量中的 MINIMAX_API_KEY，保存后重新部署。"
+        : "原主作品没有被覆盖，请重试一次或换一种音乐描述。";
       setEditorStatus(message, "error");
-      addMessage("agent", `<p>MiniMax 暂时没有完成编曲：${escapeHTML(message)}</p><p class="muted-copy">密钥只应配置在项目的 .env 文件中，保存后刷新网页即可。</p>`);
+      addMessage("agent", `<p>MiniMax 暂时没有完成编曲：${escapeHTML(message)}</p><p class="muted-copy">${help}</p>`);
       showToast(message);
     } else {
       const details = strudelErrorDetails(error);

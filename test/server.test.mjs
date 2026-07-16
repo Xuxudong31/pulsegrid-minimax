@@ -333,6 +333,23 @@ test("完整 API 链可以把 MiniMax 响应转换成可播放代码", async () 
     assert.deepEqual(restored.instrumentTracks.map((track) => track.id), ["harmonica", "flute"]);
     assert.ok(!restored.deletedTracks.includes("flute"));
     assert.match(restored.code, /let fluteVol = slider/);
+
+    const silentProjectResponse = await fetch(`http://127.0.0.1:${appAddress.port}/api/compose`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: "制作一段 132 BPM 的暗黑工业铁克诺",
+        currentCode: 'stack(s("~"))',
+        instrumentTracks: [],
+        deletedTracks: ["drums", "bass", "chords", "lead"],
+      }),
+    });
+    const recovered = await silentProjectResponse.json();
+    assert.equal(silentProjectResponse.status, 200);
+    assert.deepEqual(recovered.deletedTracks.filter((track) => ["drums", "bass", "chords", "lead"].includes(track)), []);
+    assert.match(recovered.code, /let drumsVol = slider/);
+    assert.match(recovered.code, /\.gain\(bassVol\)/);
+    assert.doesNotMatch(recovered.code, /静音占位/);
     assert.equal(receivedUrl, "/v1/chat/completions");
     assert.equal(receivedAuthorization, "Bearer test-only-key");
   } finally {

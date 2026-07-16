@@ -109,7 +109,7 @@ const SYSTEM_PROMPT = `你是脉冲音格的电子音乐编曲智能体。你要
   "volumes": {"drums":0到1,"bass":0到1,"chords":0到1,"lead":0到1}
 }
 
-编曲规则：节奏数组必须正好16格；调性、低音、和弦与旋律要相互匹配；遵守用户指定的 BPM、风格和乐器；用户说“加入、添加、新增”口琴、长笛、萨克斯等乐器时，必须把它作为独立对象加入 instrumentTracks，保留原来的主旋律，不能只在 reply 中声称已经添加，也不能用新乐器替换主旋律；leadInstrument 仅用于兼容旧结果。用户说“不要、移除、去掉”某个额外乐器时，从 instrumentTracks 中删除它；如果用户说“不要某个基础轨”，将该基础轨节奏全设为0且音量设为0。用户常会在当前作品上继续说“低音更重”“更暗”等，遇到这种修改指令要保留未被要求改变的部分。每次都返回完整的新编曲计划，确保主作品代码可以被整体覆盖。不要使用 GM 乐器。`;
+编曲规则：节奏数组必须正好16格；调性、低音、和弦与旋律要相互匹配；遵守用户指定的 BPM、风格和乐器；用户说“加入、添加、新增”口琴、长笛、萨克斯等乐器时，必须把它作为独立对象加入 instrumentTracks，保留原来的主旋律，不能只在 reply 中声称已经添加，也不能用新乐器替换主旋律；leadInstrument 仅用于兼容旧结果。用户说“不要、移除、去掉”某个额外乐器时，从 instrumentTracks 中删除它；如果用户说“不要某个基础轨”，将该基础轨节奏全设为0且音量设为0。用户常会在当前作品上继续说“低音更重”“更暗”等，遇到这种修改指令要保留未被要求改变的部分。每次都返回完整的新编曲计划，确保主作品代码可以被整体覆盖。除非用户明确要求全静音或清空所有轨道，否则至少保留一个音量大于0且节奏不是全0的可播放轨道；创作新作品时不得返回全0节奏或全0音量。不要使用 GM 乐器。`;
 
 function readEnv(file) {
   const values = {};
@@ -274,16 +274,54 @@ function normalizeDeletedTracks(value) {
   )))];
 }
 
+function defaultVolumesForStyle(style) {
+  if (style === "ambient") return { drums: 0.35, bass: 0.5, chords: 0.65, lead: 0.3 };
+  if (style === "techno") return { drums: 0.88, bass: 0.7, chords: 0.28, lead: 0.34 };
+  return { drums: 0.82, bass: 0.62, chords: 0.45, lead: 0.38 };
+}
+
+function rhythmHasEvents(...rhythms) {
+  return rhythms.some((rhythm) => Array.isArray(rhythm) && rhythm.some((step) => Number(step) > 0));
+}
+
+function isIntentionalSilenceRequest(prompt) {
+  return /(不要任何声音|全(?:部)?静音|清空所有(?:声音|轨道|分轨)|删除所有(?:声音|轨道|分轨)|移除所有(?:声音|轨道|分轨)|silence|mute\s+all|remove\s+all\s+tracks)/i.test(String(prompt || ""));
+}
+
+function planHasAudibleTrack(plan) {
+  const deleted = new Set(normalizeDeletedTracks(plan.deletedTracks));
+  if (!deleted.has("drums") && plan.volumes.drums > 0 && rhythmHasEvents(plan.kick, plan.snare, plan.hats)) return true;
+  if (!deleted.has("bass") && plan.volumes.bass > 0 && rhythmHasEvents(plan.bassRhythm)) return true;
+  if (!deleted.has("chords") && plan.volumes.chords > 0) return true;
+  if (!deleted.has("lead") && plan.volumes.lead > 0 && rhythmHasEvents(plan.leadRhythm)) return true;
+  return normalizeInstrumentTracks(plan.instrumentTracks, plan.leadNotes, plan.leadRhythm)
+    .some((track) => !deleted.has(track.id) && track.volume > 0 && rhythmHasEvents(track.rhythm));
+}
+
+function recoverSilentPlan(plan, prompt) {
+  if (planHasAudibleTrack(plan) || isIntentionalSilenceRequest(prompt)) return false;
+  const defaults = STYLE_DEFAULTS[plan.style] || STYLE_DEFAULTS.house;
+  const defaultVolumes = defaultVolumesForStyle(plan.style);
+  plan.deletedTracks = normalizeDeletedTracks(plan.deletedTracks).filter((track) => !BASE_TRACK_IDS.has(track));
+  if (!rhythmHasEvents(plan.kick, plan.snare, plan.hats)) {
+    plan.kick = stepsToArray(defaults.kick);
+    plan.snare = stepsToArray(defaults.snare);
+    plan.hats = stepsToArray(defaults.hats);
+  }
+  if (!rhythmHasEvents(plan.bassRhythm)) plan.bassRhythm = stepsToArray(defaults.bass);
+  if (!rhythmHasEvents(plan.leadRhythm)) plan.leadRhythm = stepsToArray(defaults.lead);
+  Object.keys(defaultVolumes).forEach((track) => {
+    if (!(plan.volumes[track] > 0)) plan.volumes[track] = defaultVolumes[track];
+  });
+  return true;
+}
+
 function normalizePlan(raw) {
   const style = STYLES.has(raw?.style) ? raw.style : "house";
   const defaults = STYLE_DEFAULTS[style];
   const key = normalizeKey(raw?.key, defaults.key);
   const harmony = defaultHarmony(key);
-  const defaultVolumes = style === "ambient"
-    ? { drums: 0.35, bass: 0.5, chords: 0.65, lead: 0.3 }
-    : style === "techno"
-      ? { drums: 0.88, bass: 0.7, chords: 0.28, lead: 0.34 }
-      : { drums: 0.82, bass: 0.62, chords: 0.45, lead: 0.38 };
+  const defaultVolumes = defaultVolumesForStyle(style);
 
   const plan = {
     title: safeText(raw?.title, "智能律动", 18),
@@ -523,6 +561,9 @@ async function composeWithMiniMax(prompt, currentCode, currentInstrumentTracks =
   plan.deletedTracks = [...deletedTracks];
   plan.leadInstrument = requestedInstruments.at(-1) || plan.instrumentTracks.at(-1)?.instrument || "synth";
   plan.request = safeText(prompt, "更新编曲", 72);
+  if (recoverSilentPlan(plan, prompt)) {
+    plan.reply = "检测到旧项目没有活跃分轨，已恢复鼓组、贝斯、和弦和主旋律并完成编曲。";
+  }
   const leadInstrument = LEAD_INSTRUMENTS[plan.leadInstrument] || LEAD_INSTRUMENTS.synth;
   return {
     provider: "MiniMax",
