@@ -224,6 +224,16 @@ test("所有声音分轨归零时会立即关闭 Strudel 最终输出", async ()
   assert.match(source, /const shouldOpenOutput = mixerHasAudibleOutput\(code\)/);
 });
 
+test("每个声音分轨会使用独立 Orbit 且滑杆不再重跑整首作品", async () => {
+  const source = await readFile(new URL("../app.js", import.meta.url), "utf8");
+  assert.match(source, /function createMixerOrbitMap\(code\)/);
+  assert.match(source, /\.gain\(1\)\.orbit\(\$\{trackOrbits\.get\(variable\)\}\)/);
+  assert.match(source, /attachMixerOrbitNodes\(\)/);
+  assert.match(source, /this\.trackGainNodes\.get\(variable\)\?\.gain/);
+  assert.match(source, /setMixerVolume\(variable, value\)/);
+  assert.match(source, /独立分轨音量已实时同步/);
+});
+
 test("完整 API 链可以把 MiniMax 响应转换成可播放代码", async () => {
   let receivedUrl = "";
   let receivedAuthorization = "";

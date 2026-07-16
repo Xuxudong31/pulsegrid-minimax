@@ -820,16 +820,27 @@ function sliderValuesFromCode(code) {
   );
 }
 
-function compileCodeWithMixerValues(code) {
+function createMixerOrbitMap(code) {
+  const trackDefinitions = Object.values(sliderDefinitionsFromCode(code))
+    .filter(({ variable }) => variable !== "masterVol" && variable.endsWith("Vol"));
+  return new Map(trackDefinitions.map(({ variable }, index) => [variable, 101 + index]));
+}
+
+function compileCodeWithMixerValues(code, trackOrbits = createMixerOrbitMap(code)) {
   const sliders = sliderValuesFromCode(code);
   return Object.entries(sliders).reduce((compiled, [variable, value]) => {
     if (!variable.endsWith("Vol") || !Number.isFinite(value)) return compiled;
     const safeVariable = escapeRegExp(variable);
     const volume = Math.max(0, Math.min(1, value));
     const literal = String(Math.round(volume * 10000) / 10000);
+    const replacement = variable === "masterVol"
+      ? ".gain(1)"
+      : trackOrbits.has(variable)
+        ? `.gain(1).orbit(${trackOrbits.get(variable)})`
+        : `.gain(${literal})`;
     return compiled.replace(
       new RegExp(`\\.gain\\(\\s*${safeVariable}\\s*\\)`, "g"),
-      `.gain(${literal})`,
+      replacement,
     );
   }, String(code || ""));
 }
@@ -1452,6 +1463,12 @@ class StrudelRuntime {
     this.soundfontCount = 0;
     this.soundLoadWarnings = [];
     this.outputGateOpen = true;
+    this.masterVolume = MASTER_VOLUME_DEFAULT;
+    this.trackOrbits = new Map();
+    this.trackVolumes = new Map();
+    this.trackGainNodes = new Map();
+    this.orbitRegistry = new Map();
+    this.nextOrbitNumber = 101;
   }
 
   setState(message, state = "") {
@@ -1541,16 +1558,18 @@ class StrudelRuntime {
   async run(code) {
     await this.ensure();
     const shouldOpenOutput = mixerHasAudibleOutput(code);
-    if (!shouldOpenOutput) this.setOutputGate(false, true);
+    this.setOutputGate(false, true);
+    this.configureMixerOrbits(code);
     this.lastEvalError = null;
-    await this.repl.evaluate(compileCodeWithMixerValues(code), true);
-    this.connectAnalyser();
+    await this.repl.evaluate(compileCodeWithMixerValues(code, this.trackOrbits), true);
     const evalError = this.lastEvalError || this.repl.state?.evalError;
     if (evalError) {
       this.playing = Boolean(this.repl.state?.started);
       updatePlayingUI(this.playing);
       throw evalError;
     }
+    this.attachMixerOrbitNodes();
+    this.connectAnalyser();
     this.setOutputGate(shouldOpenOutput);
     this.playing = true;
     this.startedAt = performance.now();
@@ -1588,13 +1607,101 @@ class StrudelRuntime {
     }
   }
 
+  configureMixerOrbits(code) {
+    const definitions = sliderDefinitionsFromCode(code);
+    const masterValue = Number(definitions.masterVol?.value);
+    this.masterVolume = Number.isFinite(masterValue)
+      ? Math.max(0, Math.min(1, masterValue))
+      : MASTER_VOLUME_DEFAULT;
+
+    this.trackGainNodes.forEach((_gainNode, variable) => {
+      this.setOrbitVolume(variable, 0, true);
+    });
+    this.trackGainNodes = new Map();
+
+    const nextTrackOrbits = new Map();
+    Object.values(definitions)
+      .filter(({ variable }) => variable !== "masterVol" && variable.endsWith("Vol"))
+      .forEach(({ variable }) => {
+        if (!this.orbitRegistry.has(variable)) {
+          this.orbitRegistry.set(variable, this.nextOrbitNumber);
+          this.nextOrbitNumber += 1;
+        }
+        nextTrackOrbits.set(variable, this.orbitRegistry.get(variable));
+      });
+
+    this.trackOrbits = nextTrackOrbits;
+    this.trackVolumes = new Map();
+    this.trackOrbits.forEach((_orbitNumber, variable) => {
+      const numericValue = Number(definitions[variable]?.value);
+      const volume = Number.isFinite(numericValue) ? Math.max(0, Math.min(1, numericValue)) : 0;
+      this.trackVolumes.set(variable, volume);
+    });
+  }
+
+  attachMixerOrbitNodes() {
+    const context = this.api?.getAudioContext?.();
+    const controller = this.api?.getSuperdoughAudioController?.();
+    if (!context || typeof controller?.getOrbit !== "function") return false;
+
+    const nextGainNodes = new Map();
+    this.trackOrbits.forEach((orbitNumber, variable) => {
+      const orbit = controller.getOrbit(orbitNumber);
+      const mixerGain = context.createGain();
+      mixerGain.gain.value = this.trackVolumes.get(variable) ?? 0;
+      orbit.output.disconnect();
+      orbit.output.connect(mixerGain);
+      controller.output.connectToDestination(mixerGain);
+      nextGainNodes.set(variable, mixerGain);
+    });
+    this.trackGainNodes = nextGainNodes;
+    return this.trackGainNodes.size === this.trackOrbits.size;
+  }
+
+  setOrbitVolume(variable, value, immediate = false) {
+    try {
+      const context = this.api?.getAudioContext?.();
+      const outputGain = this.trackGainNodes.get(variable)?.gain;
+      if (!context || !outputGain) return false;
+      const target = Math.max(0, Math.min(1, Number(value) || 0));
+      const now = context.currentTime;
+      outputGain.cancelScheduledValues(now);
+      if (context.state !== "running") {
+        outputGain.value = target;
+      } else {
+        outputGain.setValueAtTime(outputGain.value, now);
+        if (immediate) outputGain.setValueAtTime(target, now);
+        else outputGain.setTargetAtTime(target, now, 0.012);
+      }
+      return true;
+    } catch (error) {
+      console.warn(`无法同步 ${variable} 的独立 Strudel 音频通道`, error);
+      return false;
+    }
+  }
+
+  setMixerVolume(variable, value) {
+    const volume = Math.max(0, Math.min(1, Number(value) || 0));
+    if (variable === "masterVol") {
+      this.masterVolume = volume;
+    } else {
+      if (!this.trackOrbits.has(variable) || !this.setOrbitVolume(variable, volume)) return false;
+      this.trackVolumes.set(variable, volume);
+    }
+
+    const hasAudibleTrack = !this.trackVolumes.size
+      || [...this.trackVolumes.values()].some((trackVolume) => trackVolume > 0);
+    this.setOutputGate(this.playing && this.masterVolume > 0 && hasAudibleTrack, true);
+    return true;
+  }
+
   setOutputGate(open, immediate = false) {
     try {
       const context = this.api?.getAudioContext?.();
       const controller = this.api?.getSuperdoughAudioController?.();
       const outputGain = controller?.output?.destinationGain?.gain;
       if (!context || !outputGain) return false;
-      const target = open ? 1 : 0;
+      const target = open ? this.masterVolume : 0;
       const now = context.currentTime;
       outputGain.cancelScheduledValues(now);
       outputGain.setValueAtTime(outputGain.value, now);
@@ -2538,6 +2645,18 @@ function scheduleMixerRerun() {
   }, 70);
 }
 
+function syncMixerVolume(variable, value) {
+  if (!strudelRuntime.playing) {
+    setEditorStatus("混音已更改 · 下次播放时生效", "pending");
+    return;
+  }
+  if (strudelRuntime.setMixerVolume(variable, value)) {
+    setEditorStatus("官方 Strudel · 独立分轨音量已实时同步");
+    return;
+  }
+  scheduleMixerRerun();
+}
+
 function scheduleSliderCardSync() {
   window.clearTimeout(sliderCardSyncTimer);
   sliderCardSyncTimer = window.setTimeout(() => {
@@ -2866,8 +2985,7 @@ function initEvents() {
     updateRangeFill(event.target);
     $("#masterValue").textContent = `${Math.round(value * 100)}%`;
     if (replaceSliderDefault("masterVol", value)) {
-      strudelRuntime.closeOutputIfMixerSilent($("#codeEditor").value);
-      scheduleMixerRerun();
+      syncMixerVolume("masterVol", value);
     }
   });
 
@@ -2880,9 +2998,9 @@ function initEvents() {
     setTrackMixState(track, { volume: value, muted: false });
     $(`.mute-btn[data-track="${track}"]`)?.classList.remove("active");
     event.target.closest(".track-card").classList.remove("muted");
-    if (replaceSliderDefault(getTrackVolumeVariable(track), value)) {
-      strudelRuntime.closeOutputIfMixerSilent($("#codeEditor").value);
-      scheduleMixerRerun();
+    const variable = getTrackVolumeVariable(track);
+    if (replaceSliderDefault(variable, value)) {
+      syncMixerVolume(variable, value);
     }
   });
   $("#trackGrid").addEventListener("click", (event) => {
@@ -2899,9 +3017,10 @@ function initEvents() {
     button.classList.toggle("active", nextMuted);
     button.closest(".track-card").classList.toggle("muted", nextMuted);
     setTrackMixState(track, { muted: nextMuted });
-    if (replaceSliderDefault(getTrackVolumeVariable(track), nextMuted ? 0 : state.volume)) {
-      strudelRuntime.closeOutputIfMixerSilent($("#codeEditor").value);
-      scheduleMixerRerun();
+    const variable = getTrackVolumeVariable(track);
+    const volume = nextMuted ? 0 : state.volume;
+    if (replaceSliderDefault(variable, volume)) {
+      syncMixerVolume(variable, volume);
     }
   });
 
