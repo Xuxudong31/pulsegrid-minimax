@@ -33,10 +33,16 @@ npm start
 
 1. 将项目推送到 GitHub，确认 `.env` 没有被提交。
 2. 在 Render 中选择 **New → Blueprint**，连接这个 GitHub 仓库。
-3. 首次创建时，在 `MINIMAX_API_KEY` 输入框填写 MiniMax 密钥。
+3. 首次创建时，在 `MINIMAX_API_KEY` 输入框填写 MiniMax 密钥，并在 `ADMIN_PASSWORD` 输入框设置后台密码。
 4. 部署完成后分享 Render 提供的 `https://你的服务名.onrender.com` 地址。
 
 以后推送到默认分支会自动重新部署。密钥只保存在 Render 的环境变量中，不写入 GitHub。
+
+## 数据后台
+
+部署后访问 `https://你的服务名.onrender.com/admin`，使用 Render 环境变量中的 `ADMIN_PASSWORD` 登录。后台统计今日/累计访客、浏览量、最近 5 分钟在线人数、访问趋势、来源、设备、浏览器，以及作品播放、AI 编曲、代码运行和音色试听次数。
+
+统计使用随机匿名访客编号，不保存原始 IP。Render Blueprint 会创建名为 `pulsegrid-analytics` 的 PostgreSQL 数据库并自动注入 `DATABASE_URL`；本地未配置数据库时会退回临时内存模式，重启后本地统计会清空。
 
 ## 已实现
 
@@ -57,6 +63,7 @@ npm start
 - 支持 `stack()`、`s()`、`note()`、`.struct()`、`.scale()`、`.s()`、`.gain()`、`slider()` 与常用 `*4` mini-notation
 - 代码校验、错误行定位，以及 `Ctrl/Cmd + Enter` 运行、`Ctrl/Cmd + S` 保存
 - 本地保存、刷新恢复与响应式布局
+- 中文 `/admin` 数据后台、匿名访客统计与音乐互动统计
 
 MiniMax 调用需要联网和可用额度；Strudel 运行库已随项目本地提供，鼓机与乐器采样仍需联网按需加载。浏览器首次播放需要由用户点击按钮解锁音频。
 

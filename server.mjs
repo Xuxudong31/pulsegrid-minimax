@@ -2,6 +2,7 @@ import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createAnalyticsService } from "./analytics.mjs";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const ENV_FILE = resolve(ROOT, ".env");
@@ -9,6 +10,12 @@ const startupEnv = readEnv(ENV_FILE);
 const PORT = Number(process.env.PORT || startupEnv.PORT || 4173);
 const HOST = process.env.HOST || startupEnv.HOST || "127.0.0.1";
 const MAX_BODY_BYTES = 120_000;
+const analytics = createAnalyticsService({
+  databaseUrl: process.env.DATABASE_URL || startupEnv.DATABASE_URL || "",
+  adminPassword: process.env.ADMIN_PASSWORD || startupEnv.ADMIN_PASSWORD || "",
+  sessionSecret: process.env.ADMIN_SESSION_SECRET || startupEnv.ADMIN_SESSION_SECRET || "",
+  timeZone: process.env.ANALYTICS_TIME_ZONE || startupEnv.ANALYTICS_TIME_ZONE || "Asia/Shanghai",
+});
 
 const STYLES = new Set(["house", "techno", "lofi", "ambient", "synthwave", "trance", "dnb", "trap"]);
 const BANKS = new Set(["RolandTR909", "RolandTR808", "RolandTR707", "AkaiLinn"]);
@@ -560,7 +567,81 @@ async function readJsonBody(req) {
 async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/health") {
     const config = miniMaxConfig();
-    json(res, 200, { ok: true, provider: "MiniMax", model: config.model, configured: Boolean(config.apiKey) });
+    json(res, 200, {
+      ok: true,
+      provider: "MiniMax",
+      model: config.model,
+      configured: Boolean(config.apiKey),
+      analytics: { storage: analytics.storage, adminConfigured: analytics.configured },
+    });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/analytics/visit") {
+    const body = await readJsonBody(req);
+    try {
+      json(res, 202, { ok: true, ...(await analytics.trackVisit(body, req)) });
+    } catch (error) {
+      console.error(`[analytics] 无法记录访问：${error.message}`);
+      json(res, 202, { ok: true, tracked: false });
+    }
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/analytics/heartbeat") {
+    const body = await readJsonBody(req);
+    try {
+      json(res, 202, { ok: true, ...(await analytics.heartbeat(body, req)) });
+    } catch (error) {
+      console.error(`[analytics] 无法更新在线状态：${error.message}`);
+      json(res, 202, { ok: true, tracked: false });
+    }
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/analytics/event") {
+    const body = await readJsonBody(req);
+    try {
+      json(res, 202, { ok: true, ...(await analytics.trackEvent(body, req)) });
+    } catch (error) {
+      console.error(`[analytics] 无法记录事件：${error.message}`);
+      json(res, 202, { ok: true, tracked: false });
+    }
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/api/admin/session") {
+    json(res, 200, {
+      ok: true,
+      authenticated: analytics.isAdmin(req),
+      configured: analytics.configured,
+      storage: analytics.storage,
+    });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/admin/login") {
+    const body = await readJsonBody(req);
+    const result = analytics.login(req, String(body.password || ""));
+    if (!result.ok) {
+      json(res, result.status, { error: result.error });
+      return;
+    }
+    res.setHeader("Set-Cookie", result.cookie);
+    json(res, 200, { ok: true, storage: analytics.storage });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/admin/logout") {
+    res.setHeader("Set-Cookie", analytics.clearSessionCookie(req));
+    json(res, 200, { ok: true });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/api/admin/stats") {
+    if (!analytics.isAdmin(req)) {
+      json(res, 401, { error: "请先登录数据后台。" });
+      return;
+    }
+    try {
+      json(res, 200, { ok: true, ...(await analytics.getStats(url.searchParams.get("days"))) });
+    } catch (error) {
+      console.error(`[analytics] 无法读取统计：${error.message}`);
+      json(res, 503, { error: "统计数据库暂时不可用，请稍后刷新。" });
+    }
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/compose") {
@@ -596,7 +677,11 @@ function serveStatic(req, res, url) {
     res.end("请求地址无效");
     return;
   }
-  const requested = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
+  const requested = pathname === "/"
+    ? "index.html"
+    : pathname === "/admin" || pathname === "/admin/"
+      ? "admin.html"
+      : pathname.replace(/^\/+/, "");
   const file = resolve(ROOT, requested);
   const relativeFile = relative(ROOT, file);
   if (relativeFile === ".." || relativeFile.startsWith(`..${sep}`) || isAbsolute(relativeFile)) {
@@ -612,6 +697,8 @@ function serveStatic(req, res, url) {
   const headers = {
     "Content-Type": MIME_TYPES[extname(file).toLowerCase()] || "application/octet-stream",
     "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "SAMEORIGIN",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
     "Cache-Control": relativeFile.startsWith(`vendor${sep}`) ? "public, max-age=86400" : "no-cache",
   };
   res.writeHead(200, headers);
@@ -644,7 +731,9 @@ if (isMainModule) {
     const config = miniMaxConfig();
     console.log(`预览服务已启动：http://${HOST}:${PORT}`);
     console.log(`MiniMax ${config.model}：${config.apiKey ? "已配置" : "等待配置 MINIMAX_API_KEY"}`);
+    console.log(`数据后台：${analytics.configured ? "已配置密码" : "等待配置 ADMIN_PASSWORD"} · ${analytics.storage}`);
+    analytics.ready().catch((error) => console.error(`[analytics] 数据库初始化失败：${error.message}`));
   });
 }
 
-export { buildStrudelCode, normalizePlan, parseModelJson, server };
+export { analytics, buildStrudelCode, normalizePlan, parseModelJson, server };

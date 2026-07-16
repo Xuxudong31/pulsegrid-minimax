@@ -19,3 +19,19 @@ services:
         value: MiniMax-M3
       - key: MINIMAX_BASE_URL
         value: https://api.minimaxi.com/v1
+      - key: DATABASE_URL
+        fromDatabase:
+          name: pulsegrid-analytics
+          property: connectionString
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: ADMIN_SESSION_SECRET
+        generateValue: true
+      - key: ANALYTICS_TIME_ZONE
+        value: Asia/Shanghai
+
+databases:
+  - name: pulsegrid-analytics
+    plan: free
+    region: singapore
+    databaseName: pulsegrid_analytics

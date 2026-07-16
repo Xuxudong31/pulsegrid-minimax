@@ -203,6 +203,7 @@ const MAX_CLIENT_INSTRUMENT_TRACKS = 24;
 const LEGACY_PROJECT_STORAGE_KEY = "pulsegrid.project.v2";
 const PROJECT_LIBRARY_STORAGE_KEY = "pulsegrid.projects.v1";
 const ACTIVE_PROJECT_STORAGE_KEY = "pulsegrid.projects.active.v1";
+const ANALYTICS_VISITOR_STORAGE_KEY = "pulsegrid.analytics.visitor.v1";
 const MAX_SAVED_PROJECTS = 50;
 const STRUDEL_SAMPLE_MAPS = [
   {
@@ -257,6 +258,53 @@ let projectLibrary = [];
 let currentProjectId = null;
 let soundSearchTimer;
 let soundPreviewClearTimer;
+let analyticsVisitorId = "";
+let analyticsHeartbeatTimer;
+
+function getAnalyticsVisitorId() {
+  if (analyticsVisitorId) return analyticsVisitorId;
+  try {
+    const existing = localStorage.getItem(ANALYTICS_VISITOR_STORAGE_KEY);
+    if (/^[a-zA-Z0-9_-]{16,80}$/.test(existing || "")) {
+      analyticsVisitorId = existing;
+      return analyticsVisitorId;
+    }
+  } catch (_) {}
+  analyticsVisitorId = typeof globalThis.crypto?.randomUUID === "function"
+    ? globalThis.crypto.randomUUID()
+    : `visitor_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 14)}`;
+  try { localStorage.setItem(ANALYTICS_VISITOR_STORAGE_KEY, analyticsVisitorId); } catch (_) {}
+  return analyticsVisitorId;
+}
+
+function sendAnalytics(path, payload = {}) {
+  const body = JSON.stringify({ visitorId: getAnalyticsVisitorId(), ...payload });
+  fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    keepalive: true,
+  }).catch(() => {});
+}
+
+function trackAnalyticsEvent(name, value = "") {
+  sendAnalytics("/api/analytics/event", { name, value: String(value || "").slice(0, 120) });
+}
+
+function initAnalyticsTracking() {
+  sendAnalytics("/api/analytics/visit", {
+    path: `${location.pathname}${location.search}`.slice(0, 160),
+    referrer: document.referrer,
+  });
+  const heartbeat = () => {
+    if (document.visibilityState === "visible") sendAnalytics("/api/analytics/heartbeat");
+  };
+  analyticsHeartbeatTimer = window.setInterval(heartbeat, 60_000);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") heartbeat();
+  });
+  window.addEventListener("pagehide", () => window.clearInterval(analyticsHeartbeatTimer), { once: true });
+}
 
 function hashString(value) {
   let hash = 2166136261;
@@ -2322,10 +2370,12 @@ async function generateFromPrompt(rawPrompt) {
     setEditorStatus("正在请求 MiniMax 智能编曲…", "pending");
     const result = await requestMiniMaxComposition(prompt);
     applyMiniMaxComposition(result, prompt);
+    trackAnalyticsEvent("ai_compose", composition.label);
     typing.remove();
     phase = "strudel";
     setEditorStatus("正在启动官方 Strudel 音频引擎…", "pending");
     await strudelRuntime.run($("#codeEditor").value);
+    trackAnalyticsEvent("play", "AI 自动播放");
 
     const extra = `<div class="composition-summary"><span>每分钟 ${composition.bpm} 拍</span><span>${escapeHTML(localizeKey(composition.key))}</span><span>${escapeHTML(composition.label)}</span></div>`;
     addMessage("agent", `<p>${escapeHTML(result.reply || "MiniMax 已完成编曲，真实 Strudel 轨道已经开始运行。")}</p><p class="muted-copy">主作品代码已自动覆盖并保存；由 ${escapeHTML(result.provider)} ${escapeHTML(result.model)} 编曲，官方 Strudel 网页音频引擎演奏。</p>`, extra);
@@ -2612,6 +2662,7 @@ async function previewSoundFromBrowser(button) {
     if (type === "synth" || type === "soundfont" || type === "wavetable") value.note = "c4";
     await preloadSoundPreview(api, sound, value, variantIndex);
     await api.superdough(value, context.currentTime + 0.08, duration, composition.bpm / 60 / 4);
+    trackAnalyticsEvent("sound_preview", name);
 
     $$(".sound-chip.is-playing").forEach((item) => item.classList.remove("is-playing"));
     button.classList.add("is-playing");
@@ -2743,15 +2794,17 @@ function initEvents() {
   });
   $$("[data-prompt]").forEach((button) => button.addEventListener("click", () => generateFromPrompt(button.dataset.prompt)));
 
-  $("#playBtn").addEventListener("click", () => {
+  $("#playBtn").addEventListener("click", async () => {
     if (strudelRuntime.playing) strudelRuntime.stop();
-    else parseEditorAndRun();
+    else if (await parseEditorAndRun()) trackAnalyticsEvent("play", composition.projectName);
   });
   $("#restartBtn").addEventListener("click", async () => {
     strudelRuntime.stop();
-    await parseEditorAndRun();
+    if (await parseEditorAndRun()) trackAnalyticsEvent("play", `${composition.projectName} · 重新开始`);
   });
-  $("#runCodeBtn").addEventListener("click", parseEditorAndRun);
+  $("#runCodeBtn").addEventListener("click", async () => {
+    if (await parseEditorAndRun()) trackAnalyticsEvent("code_run", composition.projectName);
+  });
 
   $("#masterVolume").addEventListener("input", (event) => {
     const value = Number(event.target.value);
@@ -2798,7 +2851,9 @@ function initEvents() {
   $("#codeEditor").addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
       event.preventDefault();
-      parseEditorAndRun();
+      parseEditorAndRun().then((success) => {
+        if (success) trackAnalyticsEvent("code_run", composition.projectName);
+      });
       return;
     }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
@@ -2867,6 +2922,7 @@ function initEvents() {
   $("#saveBtn").addEventListener("click", () => {
     try {
       saveCurrentProject();
+      trackAnalyticsEvent("project_save", composition.projectName);
     } catch (error) {
       console.warn("无法保存本地项目", error);
       showToast("保存失败，请检查浏览器存储权限");
@@ -2891,6 +2947,7 @@ function initEvents() {
 function init() {
   const restored = restoreSavedProject();
   if (!restored) startNewProject({ skipDirtyCheck: true, announce: false });
+  initAnalyticsTracking();
   $$('input[type="range"]').forEach(updateRangeFill);
   initEvents();
   refreshMiniMaxStatus();

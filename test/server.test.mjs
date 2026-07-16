@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import test from "node:test";
+import { createAnalyticsService } from "../analytics.mjs";
 import { buildStrudelCode, normalizePlan, parseModelJson, server as staticServer } from "../server.mjs";
 
 function listen(server) {
@@ -78,17 +79,103 @@ test("删除基础分轨会同时删除音量变量和演奏层", () => {
 test("静态首页和 Strudel 运行文件可以由 Node 服务访问", async () => {
   const address = await listen(staticServer);
   try {
-    const [home, runtime] = await Promise.all([
+    const [home, runtime, admin] = await Promise.all([
       fetch(`http://127.0.0.1:${address.port}/`),
       fetch(`http://127.0.0.1:${address.port}/vendor/strudel-web-1.3.0.js`),
+      fetch(`http://127.0.0.1:${address.port}/admin`),
     ]);
     assert.equal(home.status, 200);
     assert.match(await home.text(), /脉冲音格/);
     assert.equal(runtime.status, 200);
     assert.match(runtime.headers.get("content-type") || "", /javascript/);
     assert.ok((await runtime.arrayBuffer()).byteLength > 100_000);
+    assert.equal(admin.status, 200);
+    assert.match(await admin.text(), /数据后台/);
   } finally {
     await close(staticServer);
+  }
+});
+
+test("匿名统计会区分访客、浏览量和音乐事件", async () => {
+  const analytics = createAnalyticsService({
+    adminPassword: "test-admin-password",
+    sessionSecret: "test-session-secret",
+    timeZone: "Asia/Shanghai",
+  });
+  const request = {
+    headers: {
+      host: "localhost:4173",
+      "user-agent": "Mozilla/5.0 (Windows NT 10.0) AppleWebKit Chrome/140 Safari/537.36",
+      "x-forwarded-proto": "https",
+    },
+    socket: { remoteAddress: "127.0.0.1" },
+  };
+  await analytics.trackVisit({ visitorId: "visitor_1234567890abcdef", path: "/", referrer: "https://example.com/music" }, request);
+  await analytics.trackVisit({ visitorId: "visitor_1234567890abcdef", path: "/", referrer: "" }, request);
+  await analytics.trackVisit({ visitorId: "visitor_abcdefghijklmnop", path: "/", referrer: "" }, {
+    ...request,
+    headers: { ...request.headers, "user-agent": "Mozilla/5.0 (iPhone) AppleWebKit Safari/605.1" },
+  });
+  await analytics.trackEvent({ visitorId: "visitor_1234567890abcdef", name: "play", value: "测试作品" }, request);
+  await analytics.trackEvent({ visitorId: "visitor_1234567890abcdef", name: "ai_compose", value: "深邃浩室" }, request);
+  const stats = await analytics.getStats(7);
+  assert.equal(stats.storage, "memory");
+  assert.equal(stats.overview.totalVisitors, 2);
+  assert.equal(stats.overview.totalPageviews, 3);
+  assert.equal(stats.overview.onlineVisitors, 2);
+  assert.equal(stats.events.play, 1);
+  assert.equal(stats.events.ai_compose, 1);
+  assert.ok(stats.sources.some((item) => item.label === "example.com"));
+  assert.ok(stats.devices.some((item) => item.label === "手机"));
+
+  const login = analytics.login(request, "test-admin-password");
+  assert.equal(login.ok, true);
+  const cookie = login.cookie.split(";", 1)[0];
+  assert.equal(analytics.isAdmin({ ...request, headers: { ...request.headers, cookie } }), true);
+});
+
+test("数据后台接口需要密码并返回统计看板数据", async () => {
+  const previousPassword = process.env.ADMIN_PASSWORD;
+  const previousSecret = process.env.ADMIN_SESSION_SECRET;
+  process.env.ADMIN_PASSWORD = "integration-admin-password";
+  process.env.ADMIN_SESSION_SECRET = "integration-session-secret";
+  const module = await import(`../server.mjs?analytics=${Date.now()}`);
+  const appServer = module.server;
+  const address = await listen(appServer);
+  const base = `http://127.0.0.1:${address.port}`;
+  const visitorId = "visitor_integration_123456";
+  try {
+    const visit = await fetch(`${base}/api/analytics/visit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "User-Agent": "Mozilla/5.0 Chrome/140 Safari/537.36" },
+      body: JSON.stringify({ visitorId, path: "/", referrer: "" }),
+    });
+    assert.equal(visit.status, 202);
+
+    const unauthorized = await fetch(`${base}/api/admin/stats`);
+    assert.equal(unauthorized.status, 401);
+
+    const login = await fetch(`${base}/api/admin/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "integration-admin-password" }),
+    });
+    assert.equal(login.status, 200);
+    const cookie = (login.headers.get("set-cookie") || "").split(";", 1)[0];
+    assert.match(cookie, /^pulsegrid_admin=/);
+
+    const statsResponse = await fetch(`${base}/api/admin/stats?days=7`, { headers: { Cookie: cookie } });
+    const stats = await statsResponse.json();
+    assert.equal(statsResponse.status, 200);
+    assert.equal(stats.overview.totalVisitors, 1);
+    assert.equal(stats.overview.totalPageviews, 1);
+    assert.equal(stats.daily.length, 7);
+  } finally {
+    await close(appServer);
+    if (previousPassword === undefined) delete process.env.ADMIN_PASSWORD;
+    else process.env.ADMIN_PASSWORD = previousPassword;
+    if (previousSecret === undefined) delete process.env.ADMIN_SESSION_SECRET;
+    else process.env.ADMIN_SESSION_SECRET = previousSecret;
   }
 });
 

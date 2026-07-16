@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex,nofollow" />
+    <title>脉冲音格 — 数据后台</title>
+    <link rel="stylesheet" href="admin.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-coral" aria-hidden="true"></div>
+    <div class="ambient ambient-violet" aria-hidden="true"></div>
+
+    <main class="admin-shell">
+      <section class="boot-state" id="bootState">
+        <div class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+        <span>正在连接数据后台…</span>
+      </section>
+
+      <section class="login-view" id="loginView" hidden>
+        <article class="login-card">
+          <a class="brand" href="/" aria-label="返回脉冲音格">
+            <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+            <span><strong>脉冲<span>音格</span></strong><small>数据控制台</small></span>
+          </a>
+          <div class="login-copy">
+            <span class="eyebrow">仅限管理员</span>
+            <h1>查看真实访问数据</h1>
+            <p>登录后可查看访客、浏览量、在线人数，以及播放和 AI 编曲数据。</p>
+          </div>
+          <form id="loginForm">
+            <label for="adminPassword">后台密码</label>
+            <div class="password-field">
+              <input id="adminPassword" name="password" type="password" autocomplete="current-password" placeholder="请输入 ADMIN_PASSWORD" required />
+              <button type="button" id="togglePassword" aria-label="显示密码">显示</button>
+            </div>
+            <button class="primary-button" id="loginButton" type="submit">进入数据后台</button>
+            <p class="form-error" id="loginError" role="alert"></p>
+          </form>
+          <p class="setup-note" id="setupNote" hidden>后台密码尚未配置，请先在 Render 环境变量中添加 <code>ADMIN_PASSWORD</code>。</p>
+        </article>
+      </section>
+
+      <section class="dashboard" id="dashboardView" hidden>
+        <header class="dashboard-header">
+          <a class="brand compact" href="/">
+            <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+            <span><strong>脉冲<span>音格</span></strong><small>数据后台</small></span>
+          </a>
+          <div class="header-actions">
+            <a class="ghost-button" href="/" target="_blank" rel="noopener">打开网站</a>
+            <button class="ghost-button" id="refreshButton" type="button">刷新</button>
+            <button class="ghost-button danger" id="logoutButton" type="button">退出</button>
+          </div>
+        </header>
+
+        <div class="dashboard-content">
+          <div class="dashboard-title-row">
+            <div>
+              <span class="eyebrow">实时概览</span>
+              <h1>访问数据</h1>
+              <p id="lastUpdated">正在读取最新数据…</p>
+            </div>
+            <div class="title-controls">
+              <span class="storage-badge" id="storageBadge">检查存储中</span>
+              <label>
+                <span>时间范围</span>
+                <select id="rangeSelect">
+                  <option value="7">最近 7 天</option>
+                  <option value="14" selected>最近 14 天</option>
+                  <option value="30">最近 30 天</option>
+                </select>
+              </label>
+            </div>
+          </div>
+
+          <div class="database-warning" id="databaseWarning" hidden>
+            当前使用临时内存统计，服务重启后数据会清空。线上请连接 PostgreSQL。
+          </div>
+
+          <section class="metric-grid" aria-label="核心数据">
+            <article class="metric-card coral">
+              <span class="metric-label">今日访客</span>
+              <strong id="todayVisitors">0</strong>
+              <small id="todayVisitorsCompare">昨日 0 人</small>
+            </article>
+            <article class="metric-card violet">
+              <span class="metric-label">今日浏览</span>
+              <strong id="todayPageviews">0</strong>
+              <small id="todayPageviewsCompare">昨日 0 次</small>
+            </article>
+            <article class="metric-card mint">
+              <span class="metric-label">当前在线</span>
+              <strong id="onlineVisitors">0</strong>
+              <small>最近 5 分钟活跃</small>
+            </article>
+            <article class="metric-card amber">
+              <span class="metric-label">累计访客</span>
+              <strong id="totalVisitors">0</strong>
+              <small><span id="totalPageviews">0</span> 次页面浏览</small>
+            </article>
+          </section>
+
+          <section class="content-grid">
+            <article class="panel trend-panel">
+              <header class="panel-header">
+                <div><span class="eyebrow">访问趋势</span><h2>访客与浏览量</h2></div>
+                <div class="chart-legend"><span><i class="coral-dot"></i>访客</span><span><i class="violet-dot"></i>浏览</span></div>
+              </header>
+              <div class="chart-wrap"><canvas id="trendChart" aria-label="访问趋势图"></canvas></div>
+            </article>
+
+            <article class="panel interaction-panel">
+              <header class="panel-header"><div><span class="eyebrow">音乐互动</span><h2>核心操作</h2></div></header>
+              <div class="interaction-list">
+                <div><span class="interaction-icon play">▶</span><p><strong id="eventPlay">0</strong><small>作品播放</small></p></div>
+                <div><span class="interaction-icon ai">智</span><p><strong id="eventAi">0</strong><small>AI 编曲</small></p></div>
+                <div><span class="interaction-icon sound">♪</span><p><strong id="eventSound">0</strong><small>音色试听</small></p></div>
+                <div><span class="interaction-icon code">{ }</span><p><strong id="eventCode">0</strong><small>代码运行</small></p></div>
+              </div>
+            </article>
+
+            <article class="panel list-panel">
+              <header class="panel-header"><div><span class="eyebrow">流量来源</span><h2>访客从哪里来</h2></div></header>
+              <div class="rank-list" id="sourceList"></div>
+            </article>
+
+            <article class="panel list-panel">
+              <header class="panel-header"><div><span class="eyebrow">设备分布</span><h2>访问设备</h2></div></header>
+              <div class="rank-list" id="deviceList"></div>
+            </article>
+
+            <article class="panel list-panel">
+              <header class="panel-header"><div><span class="eyebrow">浏览器分布</span><h2>客户端环境</h2></div></header>
+              <div class="rank-list" id="browserList"></div>
+            </article>
+
+            <article class="panel activity-panel">
+              <header class="panel-header"><div><span class="eyebrow">最近动态</span><h2>音乐操作记录</h2></div></header>
+              <div class="activity-list" id="activityList"></div>
+            </article>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <script src="admin.js"></script>
+  </body>
+</html>

@@ -5,6 +5,9 @@
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
-    "test": "node --check server.mjs && node --check app.js && node --test test/server.test.mjs"
+    "test": "node --check analytics.mjs && node --check server.mjs && node --check app.js && node --check admin.js && node --test test/server.test.mjs"
+  },
+  "dependencies": {
+    "pg": "^8.22.0"
   }
 }
